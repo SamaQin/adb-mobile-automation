@@ -1,0 +1,1193 @@
+{
+  "version": 2,
+  "selected_preset_id": "5db3bf6278c14cf6aec729de0f45f96b",
+  "presets": [
+    {
+      "id": "5db3bf6278c14cf6aec729de0f45f96b",
+      "name": "fgo未完成脚本自动清",
+      "loop_count": 0,
+      "steps": [
+        {
+          "id": "b5fb0a016a514703947e450f0e7c78d9",
+          "name": "识别灰色箭头未完成关卡",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "灰色箭头.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "attempts": 10,
+            "interval": 1.0,
+            "swipe_between": true,
+            "x1": 1750,
+            "y1": 990,
+            "x2": 1750,
+            "y2": 480,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 4.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "fd92dcef305742b4ae6e8c79635cf569",
+          "name": "缺少体力",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "白银果实.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 1,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "be8d42b166694577a6d4c4f25dde0aa2",
+          "name": "确认吃苹果",
+          "kind": "tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [
+            "fd92dcef305742b4ae6e8c79635cf569"
+          ],
+          "params": {
+            "x": 1557,
+            "y": 909,
+            "wait_after": 0.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "e5d8fdf51af5489a8a705a6356ed9434",
+          "name": "无脑选择第一个助战",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "助战选择.png",
+                "threshold": 0.7,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 200,
+            "wait_after": 0.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "6f3007a283964289ad7bbac2dc83a90a",
+          "name": "点击开始战斗",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "开始战斗按钮.png",
+                "threshold": 0.7,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "attempts": 5,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 0.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "d1f9001da7064a14997a2c10ab78e8aa",
+          "name": "识别模板并点击",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "请点击游戏画面.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "tap_between": false,
+            "tap_between_x": 540,
+            "tap_between_y": 1000,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 0.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "ec680edecd014f1e9792249eb34fb031",
+          "name": "战利品结算，点击下一步",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "下一步.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "tap_between": true,
+            "tap_between_x": 1094,
+            "tap_between_y": 1039,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 0.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "b6d8d55c044747d8a36f7a52e9b905d4",
+          "name": "好友申请",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "好友申请点击取消.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": -250,
+            "offset_y": 40,
+            "wait_after": 2.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "0717560a641a4576a83196111a8ddd75",
+          "name": "获得报酬",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "请点击游戏画面.png",
+                "threshold": 0.7,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              },
+              {
+                "file": "灰色箭头.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "branches": {
+              "0": [
+                {
+                  "id": "7a1055a128ae42a28e9247073c27669d",
+                  "name": "识别模板并点击",
+                  "kind": "find_and_tap",
+                  "enabled": true,
+                  "on_failure": "stop",
+                  "depends_on": [],
+                  "params": {
+                    "templates": [
+                      {
+                        "file": "请点击游戏画面.png",
+                        "threshold": 0.8,
+                        "screen_resolution": {
+                          "width": 2480,
+                          "height": 1116
+                        }
+                      }
+                    ],
+                    "require_all": false,
+                    "attempts": 10,
+                    "interval": 1.0,
+                    "tap_between": false,
+                    "tap_between_x": 540,
+                    "tap_between_y": 1000,
+                    "swipe_between": false,
+                    "x1": 540,
+                    "y1": 1800,
+                    "x2": 540,
+                    "y2": 800,
+                    "duration": 300,
+                    "offset_x": 0,
+                    "offset_y": 0,
+                    "wait_after": 4.0
+                  },
+                  "screen_resolution": {
+                    "width": 2480,
+                    "height": 1116
+                  }
+                },
+                {
+                  "id": "abc93e0123614fcc9bfffac1968a650e",
+                  "name": "识别模板并点击",
+                  "kind": "find_and_tap",
+                  "enabled": true,
+                  "on_failure": "stop",
+                  "depends_on": [],
+                  "params": {
+                    "templates": [
+                      {
+                        "file": "请点击游戏画面.png",
+                        "threshold": 0.8,
+                        "screen_resolution": {
+                          "width": 2480,
+                          "height": 1116
+                        }
+                      }
+                    ],
+                    "require_all": false,
+                    "attempts": 0,
+                    "interval": 1.0,
+                    "tap_between": false,
+                    "tap_between_x": 540,
+                    "tap_between_y": 1000,
+                    "swipe_between": false,
+                    "x1": 540,
+                    "y1": 1800,
+                    "x2": 540,
+                    "y2": 800,
+                    "duration": 300,
+                    "offset_x": 0,
+                    "offset_y": 0,
+                    "wait_after": 0.0
+                  },
+                  "screen_resolution": {
+                    "width": 2480,
+                    "height": 1116
+                  }
+                },
+                {
+                  "id": "7651b69b8ac84780a5b966f9270dc8ec",
+                  "name": "识别模板并点击",
+                  "kind": "find_and_tap",
+                  "enabled": true,
+                  "on_failure": "stop",
+                  "depends_on": [],
+                  "params": {
+                    "templates": [
+                      {
+                        "file": "关闭按钮.png",
+                        "threshold": 0.8,
+                        "screen_resolution": {
+                          "width": 2480,
+                          "height": 1116
+                        }
+                      }
+                    ],
+                    "require_all": false,
+                    "attempts": 4,
+                    "interval": 1.0,
+                    "tap_between": false,
+                    "tap_between_x": 540,
+                    "tap_between_y": 1000,
+                    "swipe_between": false,
+                    "x1": 540,
+                    "y1": 1800,
+                    "x2": 540,
+                    "y2": 800,
+                    "duration": 300,
+                    "offset_x": 0,
+                    "offset_y": 0,
+                    "wait_after": 0.0
+                  },
+                  "screen_resolution": {
+                    "width": 2480,
+                    "height": 1116
+                  }
+                },
+                {
+                  "id": "254ac6e4d0cf426693f32659ee0cc2e2",
+                  "name": "识别模板并点击",
+                  "kind": "end_loop",
+                  "enabled": true,
+                  "on_failure": "stop",
+                  "depends_on": [],
+                  "params": {},
+                  "screen_resolution": {
+                    "width": 2480,
+                    "height": 1116
+                  }
+                }
+              ],
+              "1": [
+                {
+                  "id": "e00bfdd48d2848988d8f2562e4c3e0fe",
+                  "name": "识别模板并点击",
+                  "kind": "end_loop",
+                  "enabled": true,
+                  "on_failure": "stop",
+                  "depends_on": [],
+                  "params": {},
+                  "screen_resolution": {
+                    "width": 2480,
+                    "height": 1116
+                  }
+                }
+              ]
+            },
+            "require_all": false,
+            "attempts": 4,
+            "interval": 2.0,
+            "tap_between": false,
+            "tap_between_x": 540,
+            "tap_between_y": 1000,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 2.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        }
+      ]
+    },
+    {
+      "id": "b07fc8b2916f43a8b9b037f2fdc35e33",
+      "name": "测试单步骤",
+      "loop_count": 1,
+      "steps": [
+        {
+          "id": "6007094feddd456183cb1c4e54303d61",
+          "name": "识别模板并点击",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "助战选择.png",
+                "threshold": 0.7,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 1,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 200,
+            "wait_after": 0.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        }
+      ]
+    },
+    {
+      "id": "5d26812eef104b4293cad83d115c9187",
+      "name": "自动打主线",
+      "loop_count": 1,
+      "steps": [
+        {
+          "id": "d1dfc6750bad452593bb2aed8c687f9e",
+          "name": "红点",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "红点.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "be864beb10264c96866e972f93ee3582",
+          "name": "是否无战斗",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "无战斗.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "branches": {
+              "0": [
+                {
+                  "id": "21fb47efd7164b19be7c522d5afcf297",
+                  "name": "点击开始任务",
+                  "kind": "find_and_tap",
+                  "enabled": true,
+                  "on_failure": "stop",
+                  "depends_on": [],
+                  "params": {
+                    "templates": [
+                      {
+                        "file": "任务开始.png",
+                        "threshold": 0.8,
+                        "screen_resolution": {
+                          "width": 2480,
+                          "height": 1116
+                        }
+                      }
+                    ],
+                    "require_all": false,
+                    "attempts": 1,
+                    "interval": 1.0,
+                    "swipe_between": false,
+                    "x1": 540,
+                    "y1": 1800,
+                    "x2": 540,
+                    "y2": 800,
+                    "duration": 300,
+                    "offset_x": 0,
+                    "offset_y": 0,
+                    "wait_after": 0.0
+                  },
+                  "screen_resolution": {
+                    "width": 2480,
+                    "height": 1116
+                  }
+                },
+                {
+                  "id": "60776c0cfb924447b65598fc9b7c60f9",
+                  "name": "找到跳过按钮",
+                  "kind": "find_and_tap",
+                  "enabled": true,
+                  "on_failure": "stop",
+                  "depends_on": [],
+                  "params": {
+                    "templates": [
+                      {
+                        "file": "跳过按钮.png",
+                        "threshold": 0.7,
+                        "screen_resolution": {
+                          "width": 2480,
+                          "height": 1116
+                        }
+                      }
+                    ],
+                    "require_all": false,
+                    "attempts": 0,
+                    "interval": 1.0,
+                    "swipe_between": true,
+                    "x1": 540,
+                    "y1": 1800,
+                    "x2": 540,
+                    "y2": 800,
+                    "duration": 300,
+                    "offset_x": 0,
+                    "offset_y": 0,
+                    "wait_after": 0.0
+                  },
+                  "screen_resolution": {
+                    "width": 2480,
+                    "height": 1116
+                  }
+                },
+                {
+                  "id": "b62868a4ea9a4a22aafdac2a34f8ff88",
+                  "name": "跳过",
+                  "kind": "find_and_tap",
+                  "enabled": true,
+                  "on_failure": "stop",
+                  "depends_on": [],
+                  "params": {
+                    "templates": [
+                      {
+                        "file": "是否跳过剧情弹窗.png",
+                        "threshold": 0.8,
+                        "screen_resolution": {
+                          "width": 2480,
+                          "height": 1116
+                        }
+                      }
+                    ],
+                    "require_all": false,
+                    "attempts": 0,
+                    "interval": 1.0,
+                    "swipe_between": false,
+                    "x1": 540,
+                    "y1": 1800,
+                    "x2": 540,
+                    "y2": 800,
+                    "duration": 300,
+                    "offset_x": 250,
+                    "offset_y": 200,
+                    "wait_after": 0.0
+                  },
+                  "screen_resolution": {
+                    "width": 2480,
+                    "height": 1116
+                  }
+                }
+              ]
+            },
+            "require_all": false,
+            "attempts": 1,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 2.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "cf539514821e40fa8eb81f696158011b",
+          "name": "找箭头",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "灰色箭头.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 1,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 0.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "afbfce75514c4900b45ae6fddee46962",
+          "name": "是否显示战斗前开始编队",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "战斗前编队.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 1,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "00b5b580023e4137b65052e409fce8e1",
+          "name": "识别模板并点击",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [
+            "afbfce75514c4900b45ae6fddee46962"
+          ],
+          "params": {
+            "templates": [
+              {
+                "file": "战斗前编队弹窗.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "7a070e0ee8c44bef856884eadaf901e5",
+          "name": "是否有剧情",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "跳过按钮.png",
+                "threshold": 0.7,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 10,
+            "interval": 1.0,
+            "swipe_between": true,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "362d724839df4c30bdb2392a165d02d4",
+          "name": "跳过",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [
+            "7a070e0ee8c44bef856884eadaf901e5"
+          ],
+          "params": {
+            "templates": [
+              {
+                "file": "是否跳过剧情弹窗.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 250,
+            "offset_y": 200,
+            "wait_after": 0.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "71a6483457ed48eeb3805fbda183b99b",
+          "name": "选择第一个助战",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "助战选择.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 200,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "4ea4d582b46c4b80904119f76d6a968a",
+          "name": "可能存在的关闭按钮",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "关闭按钮.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 2,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "9ecfd0b80576400db7dbbb17358ad3d6",
+          "name": "战斗开始",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "战斗开始.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 10,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "f877465663674a308e369f200b319240",
+          "name": "点击游戏画面",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "请点击游戏画面.png",
+                "threshold": 0.7,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "11d1fc68760c42ccacd8bf849d5aa57b",
+          "name": "点击游戏画面 副本",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "请点击游戏画面.png",
+                "threshold": 0.7,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 2,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "4fc9192e00054ec19a05a62d175cf03d",
+          "name": "下一步",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "stop",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "下一步.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "swipe_between": true,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 0.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "f602f19d92c341408ec918c3367e791c",
+          "name": "是否有剧情 副本",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [],
+          "params": {
+            "templates": [
+              {
+                "file": "跳过按钮.png",
+                "threshold": 0.7,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 10,
+            "interval": 1.0,
+            "swipe_between": true,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 0,
+            "offset_y": 0,
+            "wait_after": 1.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        },
+        {
+          "id": "d2c5c56c0cee42d8b8995e3675054cde",
+          "name": "跳过 副本",
+          "kind": "find_and_tap",
+          "enabled": true,
+          "on_failure": "continue",
+          "depends_on": [
+            "7a070e0ee8c44bef856884eadaf901e5"
+          ],
+          "params": {
+            "templates": [
+              {
+                "file": "是否跳过剧情弹窗.png",
+                "threshold": 0.8,
+                "screen_resolution": {
+                  "width": 2480,
+                  "height": 1116
+                }
+              }
+            ],
+            "require_all": false,
+            "attempts": 0,
+            "interval": 1.0,
+            "swipe_between": false,
+            "x1": 540,
+            "y1": 1800,
+            "x2": 540,
+            "y2": 800,
+            "duration": 300,
+            "offset_x": 250,
+            "offset_y": 200,
+            "wait_after": 0.0
+          },
+          "screen_resolution": {
+            "width": 2480,
+            "height": 1116
+          }
+        }
+      ]
+    }
+  ],
+  "acceleration": "cpu"
+}
