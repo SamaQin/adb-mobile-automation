@@ -10,7 +10,7 @@ Windows 下在项目目录运行：
 .venv\Scripts\python.exe main.py
 ```
 
-服务默认监听 `http://127.0.0.1:8000` 并自动打开浏览器。开发前端时，可在另一个终端运行 `cd web && npm run dev`，Vite 会把 `/api` 与 `/ws` 代理到 Python 服务。
+服务默认监听 `http://127.0.0.1:8001` 并自动打开浏览器（可用 `--port 8000` 或 `--no-browser` 覆盖）。开发前端时，可在另一个终端运行 `cd web && npm run dev`，Vite 会把 `/api` 与 `/ws` 代理到 Python 服务。
 
 如果需要重建环境：
 
@@ -40,6 +40,54 @@ npm run build
 配置继续写入 `config.json`，截图模板写入 `templates_file/`，以兼容已有用户数据。旧版仅包含 `support_pos` 和 `start_pos` 的配置会在首次启动时自动迁移并保留原流程。
 
 截图交互窗口会根据手机截图与电脑屏幕尺寸自动等比缩小；模板区域、点击位置和滑动轨迹都会换算回手机原始分辨率坐标。
+
+## 打包发布
+
+项目使用 PyInstaller 打包为免安装的单目录程序（`ADB-Automation.spec`），前端静态资源、`adb.exe` 及 ADB 运行库都会一并打入。
+
+### 准备工作（仅首次）
+
+```bat
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install pyinstaller
+cd web
+npm install
+```
+
+### 打包步骤
+
+```bat
+REM 1. 构建前端（产物输出到 web\dist）
+cd web
+npm run build
+cd ..
+
+REM 2. 执行 PyInstaller 打包（按 ADB-Automation.spec）
+.venv\Scripts\pyinstaller.exe --noconfirm ADB-Automation.spec
+```
+
+打包完成后，可执行文件在：
+
+```text
+dist\ADB-Automation\ADB-Automation.exe
+```
+
+### 分发与运行
+
+- 把 `dist\ADB-Automation\` 整个文件夹拷到目标机器即可运行，无需安装 Python 或 Node.js。
+- 双击 `ADB-Automation.exe` 启动，服务默认监听 `http://127.0.0.1:8001` 并自动打开浏览器；需要改端口或不开浏览器时，在命令行运行：
+  ```bat
+  ADB-Automation.exe --port 8080 --no-browser
+  ```
+- 用户数据（`config.json`、`templates_file\`）会在 exe 所在目录首次启动时自动创建，重装/升级前备份这两个即可。
+- 每次修改前端代码后需要重新打包时，重复“打包步骤”中的两步即可；只改 Python 代码则只需第 2 步。
+
+### 常见问题
+
+- 打包后启动失败：多为 `web\dist` 不是最新，先执行 `npm run build` 再打包。
+- 端口被占用：换 `--port` 启动。
+- 目标机器无 ADB 驱动：程序已内置 `adb.exe`，但需在系统里装好手机对应厂商的 USB 驱动，并开启 USB 调试授权。
 
 ## 验证
 
