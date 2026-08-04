@@ -3,7 +3,7 @@
 .venv
 build
 dist
-templates_file
+templates_file/*
 docs
 web/node_modules
 web/artifacts
