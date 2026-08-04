@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from typing import Sequence
 
 import cv2
@@ -16,8 +17,12 @@ class DeviceError(RuntimeError):
 
 class AdbClient:
     def __init__(self, project_root: Path) -> None:
-        bundled = project_root / "adb.exe"
-        self.executable = str(bundled.resolve()) if bundled.exists() else (
+        candidates = [project_root / "adb.exe"]
+        bundled_root = getattr(sys, "_MEIPASS", None)
+        if bundled_root:
+            candidates.append(Path(bundled_root) / "adb.exe")
+        bundled = next((candidate for candidate in candidates if candidate.exists()), None)
+        self.executable = str(bundled.resolve()) if bundled is not None else (
             shutil.which("adb") or "adb"
         )
 

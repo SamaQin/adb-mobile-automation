@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 from .models import AppConfig, Preset, Step
+from .operations import ValidationError, config_from_payload, validate_config
 
 
 if getattr(sys, "frozen", False):
@@ -47,6 +48,9 @@ def legacy_fgo_preset(
                     "x2": 540,
                     "y2": 800,
                     "duration": 300,
+                    "tap_mode": "single",
+                    "click_x": 540,
+                    "click_y": 1000,
                     "wait_after": 0.0,
                 },
             ),
@@ -108,9 +112,7 @@ class ConfigStore:
                 config = self._migrate_legacy(data)
                 self.save(config)
                 return config
-            config = AppConfig.from_dict(data)
-            self._validate(config)
-            return config
+            return config_from_payload(data, normalize_dependencies=False)
         except ConfigError:
             raise
         except (AttributeError, TypeError, ValueError) as exc:
@@ -141,19 +143,7 @@ class ConfigStore:
 
     @staticmethod
     def _validate(config: AppConfig) -> None:
-        if config.acceleration not in {"cpu", "gpu"}:
-            raise ConfigError("配置内容无效: 不支持的加速模式")
-        preset_ids: set[str] = set()
-        preset_names: set[str] = set()
-        step_ids: set[str] = set()
-        for preset in config.presets:
-            if preset.id in preset_ids:
-                raise ConfigError(f"配置内容无效: 重复的预设 ID {preset.id}")
-            if preset.name in preset_names:
-                raise ConfigError(f"配置内容无效: 重复的预设名称 {preset.name}")
-            preset_ids.add(preset.id)
-            preset_names.add(preset.name)
-            for step in preset.steps:
-                if step.id in step_ids:
-                    raise ConfigError(f"配置内容无效: 重复的步骤 ID {step.id}")
-                step_ids.add(step.id)
+        try:
+            validate_config(config)
+        except ValidationError as exc:
+            raise ConfigError(f"配置内容无效: {exc}") from exc

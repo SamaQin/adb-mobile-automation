@@ -14,6 +14,7 @@ class StepResult:
     success: bool
     message: str = ""
     restart: bool = False
+    jump_to: str | None = None
 
 
 @dataclass
@@ -25,6 +26,7 @@ class RuntimeContext:
     engine: "StepEngine | None" = None
     presets: "dict[str, Preset] | None" = None
     preset_path: "tuple[tuple[str, str], ...]" = ()
+    allow_external_jump: bool = False
 
     def wait(self, seconds: float) -> bool:
         return not self.stop_event.wait(max(0.0, seconds))
@@ -34,6 +36,7 @@ class RuntimeContext:
 class ExecutionReport:
     status: str
     message: str
+    jump_to: str | None = None
 
 
 class StepEngine:
@@ -72,15 +75,19 @@ class StepEngine:
             elif loop_count > 1:
                 context.log(f"第 {cycle}/{loop_count} 轮（已重置步骤状态）")
 
-            for index, step in enumerate(active_steps, start=1):
+            cursor = 0
+            while cursor < len(active_steps):
                 if context.stop_event.is_set():
                     return ExecutionReport("stopped", "执行已停止")
+                index = cursor + 1
+                step = active_steps[cursor]
 
                 missing = [dep for dep in step.depends_on if dep in skipped]
                 if missing:
                     skipped.add(step.id)
                     names = "、".join(id_to_name.get(dep, dep) for dep in missing)
                     context.log(f"  跳过：前置步骤未执行（{names}）")
+                    cursor += 1
                     continue
 
                 definition = self.registry.get(step.kind)
@@ -101,12 +108,41 @@ class StepEngine:
                     if result.restart:
                         context.log("  本轮执行结束，开始下一轮循环")
                         break
+                    jump_target = result.jump_to or step.params.get("return_to")
+                    if jump_target:
+                        propagated = result.jump_to is not None
+                        target_cursor = next(
+                            (
+                                item_index
+                                for item_index, item in enumerate(active_steps)
+                                if item.id == jump_target
+                            ),
+                            None,
+                        )
+                        if target_cursor is not None and (
+                            target_cursor < cursor or (propagated and target_cursor == cursor)
+                        ):
+                            context.log(
+                                f"  返回步骤“{id_to_name.get(jump_target, jump_target)}”"
+                            )
+                            cursor = target_cursor
+                            continue
+                        if target_cursor is None:
+                            if context.allow_external_jump:
+                                context.log(f"  请求跳转到外部步骤“{jump_target}”")
+                                context.log("预设执行完成")
+                                return ExecutionReport(
+                                    "completed", "已请求跳转", jump_to=jump_target
+                                )
+                            context.log(f"  忽略无效的返回目标“{jump_target}”")
+                    cursor += 1
                     continue
 
                 reason = result.message or "步骤执行失败"
                 if step.on_failure == "continue":
                     skipped.add(step.id)
                     context.log(f"  跳过：{reason}")
+                    cursor += 1
                     continue
                 context.log(f"  中止：{reason}")
                 return ExecutionReport("failed", f"步骤“{step.name}”失败：{reason}")

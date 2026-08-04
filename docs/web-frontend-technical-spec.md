@@ -10,7 +10,7 @@
 | 目标后端 | Python 保留（新增 HTTP/WebSocket 桥接服务） |
 | 配置协议 | `config.json`，schema version 2（保持不变） |
 | 预设包协议 | ZIP，archive version 1（保持不变） |
-| 自动化测试基线 | 后端 39 项单元测试（保留） |
+| 自动化测试基线 | 后端 68 项单元测试（保留） |
 
 本文档定义用浏览器画布界面替换 Tkinter GUI 的技术方案，用于产品评审、技术设计、开发拆分和验收，不包含实现代码。
 
@@ -63,14 +63,16 @@
 
 | 现有模块 | 处理方式 |
 | --- | --- |
-| `model_automation/gui.py` | 整体移除；职责拆分给前端页面 + web_server API |
-| `model_automation/engine.py` | 原样保留，worker 线程由 web_server 管理 |
+| `model_automation/gui.py` | 整体移除；`normalize_dependencies` / `reorder_steps` 先下沉到 `models.py`（见下），其余职责拆分给前端页面 + web_server API |
+| `model_automation/engine.py` | 原样保留（不加钩子），worker 线程由 web_server 管理；步骤级 `step`/`status` 事件由 web_server 解析日志回调获得（§8.3） |
 | `model_automation/steps.py` | 原样保留，新增 `step_definitions()` 序列化入口供前端动态生成表单 |
 | `model_automation/registry.py` | 保留；桥接服务读取 `FieldSpec` 生成 JSON schema |
 | `model_automation/device.py` | 原样保留，截图经 API 编码后传输 |
 | `model_automation/vision.py` | 保留 `find_template/load_image/save_image` 等计算函数；删除 `select_region/select_point/select_swipe` 弹窗函数（浏览器替代） |
 | `model_automation/config.py` | 保留，新增面向 API 的读取/保存封装 |
-| `model_automation/preset_archive.py` | 保留，导入导出经 API 以文件字节流传输 |
+| `model_automation/preset_archive.py` | 保留，导入导出经 API 以文件字节流传输；`import_preset` 需补充分支步骤（`branches[]`）ID 与 `depends_on` 重映射（桌面版缺口，§5.2 第 1 条） |
+| `model_automation/gui.py:normalize_dependencies`、`reorder_steps` | 下沉为 `models.py`（或独立模块）的独立函数，web_server 与前端转换层复用；gui.py 移除前必须先迁移 |
+| `main.py` | 由 `run_app()`（Tkinter）改为启动 web_server（uvicorn 拉起，见 §16） |
 
 ### 3.2 关键技术决策
 
@@ -83,7 +85,7 @@
 | 状态管理 | Pinia | Vue 官方推荐，store 模式直观 |
 | HTTP 客户端 | fetch（或 axios） | 按项目规模任选，文档按 fetch 设计 |
 | 后端桥接 | FastAPI + uvicorn + websockets | 自带 OpenAPI 文档、原生 WS 支持、依赖注入简洁 |
-| 截图传输 | JPEG/PNG 二进制（REST）+ WS 推送运行帧 | 减少 base64 体积，浏览器端 `createImageBitmap` 解码 |
+| 截图传输 | JPEG/PNG 二进制（REST，`?max_width=` 缩略参数） | 减少 base64 体积，浏览器端 `createImageBitmap` 解码；首版不通过 WS 推送运行帧（事件集见 §8.2） |
 | 布局持久化 | 浏览器 localStorage | 见 §7.8，不污染 `config.json` |
 
 ## 4. 页面与布局设计
@@ -116,6 +118,24 @@
 
 运行状态通过顶部“运行/停止”按钮和画布高亮表达，不单独开页面。执行顺序语义、泳道分组、撤销/重做、只读模式等画布能力详见 §7。
 
+### 4.1 视觉风格设计规范（玻璃态 / Glassmorphism）
+
+设计提示词（可直接作为前端构建与 AI 生成/评审的统一输入）：
+
+> 现代玻璃态（Glassmorphism）桌面工作台：深色半透明毛玻璃面板（backdrop-filter 模糊 + 半透明底色 + 1px 内发光边框），背景为深色渐变叠加品牌色径向光晕；卡片化圆角布局、柔和投影，视觉层次清晰（背景 → 面板 → 控件三级），简洁统一、留白充分、易于阅读和互动；信息密度适中，中文优先；布局不响应式，仅适配电脑桌面（≥1280px 宽固定工作台）；可访问性达标（WCAG AA 对比度、键盘可操作、状态不只依赖颜色）。
+
+| 维度 | 规范 |
+| --- | --- |
+| 背景 | 深色主题为主：`#0f1420` 系渐变底 + 品牌色（青蓝 `#38bdf8`）径向光晕（低透明度）；画布区叠加点阵网格（§7.9 Background） |
+| 玻璃面板 | 顶栏/左栏/右栏/日志/抽屉/弹层统一：半透明底 `rgba(255,255,255,0.06~0.10)`，`backdrop-filter: blur(14~20px)`，1px 内发光边框 `rgba(255,255,255,0.12)`，圆角 12~16px，柔和阴影（`0 8px 32px rgba(0,0,0,0.35)`） |
+| 字体 | 系统字体栈 `-apple-system, "Segoe UI", "Microsoft YaHei", sans-serif`；字号层级 12 / 13 / 14 / 16 / 20，行高 1.5；数字与代码用等宽栈 |
+| 颜色语义 | 品牌色（运行/主操作/选中高亮）、成功绿 `#34d399`、失败红 `#f87171`、跳过灰、警告橙 `#fbbf24`；节点类型配色沿用 §7.3，玻璃化后保证深底对比度达标 |
+| 交互反馈 | hover 亮度/阴影提升，active 下沉；transition 150~200ms；按钮/输入框/滑块/开关全站统一一套控件样式（建议 Element Plus + 覆写玻璃态） |
+| 视觉层次 | 三级层次：背景 → 玻璃面板 → 控件/内容；面板阴影与模糊度分级（悬浮层 > 侧栏 > 底栏）；关键操作（运行/停止）用品牌色实心按钮突出 |
+| 简洁与统一 | 8px 间距栅格；线性图标 1.5px；卡片与列表统一圆角/描边/间距；中英文混排自动留白；同一语义的操作不出现第二种样式 |
+| 可访问性 | 正文对比度 ≥ 4.5:1（AA），大字 ≥ 3:1；`focus-visible` 焦点环；完整键盘可达（Tab 遍历 + 快捷键见 §7.13）；状态表达 = 颜色 + 图标 + 文字三者并存（§7.17） |
+| 布局 | 不响应式、仅桌面：固定工作台骨架（顶栏 52px、左栏 220px、右栏 320px、底部日志 220px 可折叠），画布区自适应剩余空间；浏览器最小窗口 1280×800，缩放窗口仅调整画布区域 |
+
 ## 5. 功能继承清单
 
 以下桌面版功能全部保留，语义不变：
@@ -146,9 +166,9 @@
 | 操作 | 出处 | 当前行为与规则 | 前端工作流化呈现 | 差异与注意点 |
 | --- | --- | --- | --- | --- |
 | 新建预设 | `gui.py:_new_preset` | 名称去空格、非空、全配置唯一；追加并设为当前 | 顶部工具栏“新建”，输入名称，画布切换为空画布 | 重名必须拒绝并提示“已有同名预设” |
-| 复制预设 | `gui.py:_duplicate_preset` | 默认名“`{原名} 副本`”；深拷贝；**新预设 ID + 全部步骤新 ID + `depends_on` 同步重映射**；设为当前 | 工具栏“复制”，生成新画布并自动布局 | 重映射必须与 ID 生成同批完成，漏一处即产生悬空依赖 |
+| 复制预设 | `gui.py:_duplicate_preset` | 默认名“`{原名} 副本`”；深拷贝；**新预设 ID + 全部步骤新 ID + `depends_on` 同步重映射**；设为当前 | 工具栏“复制”，生成新画布并自动布局 | 重映射必须与 ID 生成同批完成，漏一处即产生悬空依赖；**必须覆盖 `branches[]` 内分支步骤**（桌面版缺口，web_server 经 `POST /api/presets/{id}/duplicate` 补齐） |
 | 重命名预设 | `gui.py:_rename_preset` | 唯一（排除自身）；原名不变时直接返回 | 工具栏“重命名” | 与步骤名称无关，仅预设名唯一 |
-| 删除预设 | `gui.py:_delete_preset` | 配置至少保留一个；**扫描所有预设中 `run_preset` 步骤对它的引用**，确认框列出引用者 | 确认对话框展示引用列表；删除后自动切到第一个预设 | 引用提示文本必须保留，防止用户无感知破坏其他预设 |
+| 删除预设 | `gui.py:_delete_preset` | 配置至少保留一个；**扫描所有预设中 `run_preset` 步骤对它的引用**，确认框列出引用者 | 确认对话框展示引用列表；删除后自动切到第一个预设 | 引用提示文本必须保留，防止用户无感知破坏其他预设；**引用扫描必须覆盖 `branches[]` 内步骤**（桌面版 `_delete_preset` 仅扫主流程步骤，web_server 经 `GET /api/presets/{id}/references` 修复） |
 | 切换预设 | `gui.py:_select_preset` | 更新 `selected_preset_id` 并立即保存 | 顶部下拉；切换时画布整体替换（节点、边、布局都按预设切换） | 切换即保存；画布布局按 `layout:{presetId}` 分别记忆 |
 | 循环次数 | `gui.py:_save_loop_count` | 必须是非负整数；负数拒绝并恢复原值；`0` 表示无限 | 顶部数字输入或属性面板（未选中节点时）；失焦/回车即校验保存 | `0` 的无限语义只由后端引擎解释，前端只做输入约束 |
 
@@ -158,7 +178,7 @@
 | --- | --- | --- | --- | --- |
 | 新增步骤 | `gui.py:_add_step` + `StepDialog` | 无选中时追加到末尾；选中时插入到选中步骤**之后**；新步骤可依赖“插入点之前的所有步骤” | 左栏组件库拖入/双击添加；画布坐标即落点 | 新增时字段为类型默认值；坐标默认 `(540,1000)` 仅为编辑器默认，运行器参数缺失时回退 `(0,0)` |
 | 编辑步骤 | `gui.py:_edit_step` | 可依赖范围 = 列表中**它之前的步骤** | 点击节点 → 右侧属性面板直接编辑 | 依赖下拉/连线只能指向更早步骤 |
-| 复制步骤 | `gui.py:_duplicate_step` | 插入到原步骤之后；**新 ID**；名称追加“ 副本”；`depends_on` 原样复制（仍合法，因为复制件紧跟原步骤） | 节点右键/键盘复制，画布上新增相邻节点 | 复制后原步骤的依赖关系不会指向复制件，无需重映射入边 |
+| 复制步骤 | `gui.py:_duplicate_step` | 插入到原步骤之后；**新 ID**；名称追加“ 副本”；`depends_on` 原样复制（仍合法，因为复制件紧跟原步骤） | 节点右键/键盘复制，画布上新增相邻节点 | 复制后原步骤的依赖关系不会指向复制件，无需重映射入边；识别步骤的 `branches[]` 内分支步骤 ID 必须同步重生成（桌面版未处理，web_server 补） |
 | 启用/停用 | `gui.py:_toggle_step` | 切换 `enabled` | 节点右键菜单/属性面板开关；节点置灰显示 | 停用节点仍显示在画布 |
 | 删除步骤 | `gui.py:_delete_step` | 确认后删除；**`normalize_dependencies` 清理其他步骤对它的依赖** | 选中节点 Delete 键/右键删除；同时删除所有入边出边 | 必须级联清理依赖，否则保存后后端会规范化出差异 |
 | 上移/下移 | `gui.py:_move_step` | 相邻交换；`reorder_steps` 触发依赖规范化 | 属性面板“上移/下移”按钮 | 位置移动与执行顺序同步变化 |
@@ -175,7 +195,7 @@
 | 识别并点击 `find_and_tap` | `steps.py:run_find_and_tap` | `templates=[]`（至少 1 个）、`require_all`、`attempts=1`（0 无限）、`interval=1.0`、`tap_between`(+`tap_between_x/y`)、`swipe_between`(+滑动参数)、`offset_x/y=0`、`wait_after=0.0`、`branches` | 每轮重新截图；命中即点击/执行分支；未命中按重试流程（滑动/点击/等待）；多模板同时命中按 `(y, x, index)` 选择；偏移后超屏失败；`attempts` 耗尽返回“尝试 N 次后仍未识别到目标” | 节点带模板缩略图行、分支徽标；模板选择器 + 阈值滑块；失败处理可选“跳到下一步” |
 | 识别并连击 `find_and_multi_tap` | `steps.py:run_find_and_multi_tap` | 继承识别点击参数 + `click_count=2`（≥1）、`click_interval=0.1` | 命中后连击 `click_count` 次，间隔 `click_interval` | 节点徽标显示“连击 N 次” |
 | 结束本次循环 `end_loop` | `steps.py:run_end_loop` | 无参数 | 立即结束本轮，进入下一轮循环 | 节点：循环图标，无参数表单 |
-| 执行预设 `run_preset` | `steps.py:run_run_preset` | `preset_id`（必填）、`preset_name` | 子预设以 `loop_count=1` 执行；**循环引用检测**（`preset_path`）；失败/停止按子预设结果 | 节点：预设下拉选择器（保存 `preset_id` + 回显 `preset_name`）；删除预设时引用提示依赖此信息 |
+| 执行预设 `run_preset` | `steps.py:run_run_preset` | `preset_id`（必填）、`preset_name` | 子预设以 `loop_count=1` 执行；**循环引用检测**（`preset_path`）；失败/停止按子预设结果 | 节点：预设下拉选择器（保存 `preset_id`，回显按 `preset_id` 匹配、`preset_name` 仅作显示回退，见 §6）；删除预设时引用提示依赖此信息 |
 
 前端对以上类型只需生成/编辑参数，**运行语义完全由后端 `engine.py` + `steps.py` 承担**；前端表单校验与运行器钳制规则保持一致（见 §15），但不得自行实现执行逻辑。
 
@@ -211,7 +231,7 @@
 | 操作 | 出处 | 当前行为与规则 | 前端工作流化呈现 | 差异与注意点 |
 | --- | --- | --- | --- | --- |
 | 检查设备 | `gui.py:_check_device` | `adb get-state`，成功显示状态、失败显示原因 | 顶部状态点 + “检查设备”按钮；`GET /api/device/state` | 后台线程执行，UI 不阻塞 |
-| 运行 | `gui.py:_run` | 前置：非运行中、循环次数有效、`adb get-state == "device"`；**运行时深拷贝预设快照**；禁用编辑控件；日志先打印加速模式 | “运行”按钮 → `POST /api/run`；画布进入等效只读态；WS 接收状态与日志 | 快照语义由后端保证：运行期间编辑数据不影响本次执行 |
+| 运行 | `gui.py:_run` | 前置：非运行中、循环次数有效、`adb get-state == "device"`；**运行时深拷贝预设快照**；禁用编辑控件；日志先打印加速模式 | “运行”按钮 → `POST /api/run`；画布进入等效只读态；WS 接收状态与日志 | 快照语义由后端保证：运行期间编辑数据不影响本次执行；**快照必须覆盖全部预设**（`run_preset` 步骤运行时引用 `context.presets`，桌面版传活配置对象，web_server 启动时深拷贝全部预设，见 §8.3） |
 | 停止 | `gui.py:_stop` | 置停止事件；提示“已请求停止，等待当前 ADB 命令结束”；`RuntimeContext.wait` 可中断；已提交的 ADB 命令不可撤销 | “停止”按钮 → `POST /api/stop` | 停止反馈目标 100ms 内 |
 | 运行中禁用编辑 | `gui.py:_run` 禁用控件 | 步骤增删改、模板操作、导入导出全部在 `_is_running()` 时拒绝并提示“请先停止当前预设” | 前端只读态 + 后端 409 双保险 | 与“运行/停止”按钮状态联动 |
 | 结束态 | `gui.py:_drain_events` | 完成/失败/手动停止三种终态；状态栏显示 `report.message`；恢复控件 | `finished` 事件 → 按钮恢复、节点终态着色、日志末尾状态行 | `ExecutionReport.status ∈ {completed, failed, stopped}` |
@@ -221,7 +241,7 @@
 | 操作 | 出处 | 当前行为与规则 | 前端工作流化呈现 | 差异与注意点 |
 | --- | --- | --- | --- | --- |
 | 导出 | `gui.py:_export_preset` + `preset_archive.export_preset` | 运行中拒绝；文件名净化（`<>:"/\|?*` → `_`）；只打包引用的模板、缺失模板整体失败、缺 `screen_resolution` 整体失败、未知步骤类型整体失败 | 顶部“导出” → 浏览器下载 `.adb-preset.zip` | 失败原因弹窗与后端文案一致 |
-| 导入 | `gui.py:_import_preset` + `preset_archive.import_preset` | 运行中拒绝；**先取当前设备分辨率**（失败则无法导入）；安全解包（清单逐项、SHA-256、路径穿越拒绝、大小/数量上限）；**新预设 ID + 步骤 ID 重映射 + 依赖重映射**；拒绝缺失/跨预设/后置依赖；名称冲突生成“`原名 导入`”“`原名 导入 2`”；模板同名冲突（不区分大小写、字节比对、`_imported` 后缀）；分辨率适配（X/Y 比例、ties-to-even、缩小时区域插值）；完成后刷新模板列表并提示适配分辨率 | 顶部“导入” → 文件选择 → 后端处理 → 画布重建并自动布局；冲突/失败对话框 | 前端只做上传与结果展示，重映射/缩放全在后端 |
+| 导入 | `gui.py:_import_preset` + `preset_archive.import_preset` | 运行中拒绝；**先取当前设备分辨率**（失败则无法导入）；安全解包（清单逐项、SHA-256、路径穿越拒绝、大小/数量上限）；**新预设 ID + 步骤 ID 重映射 + 依赖重映射**；拒绝缺失/跨预设/后置依赖；名称冲突生成“`原名 导入`”“`原名 导入 2`”；模板同名冲突（不区分大小写、字节比对、`_imported` 后缀）；分辨率适配（X/Y 比例、ties-to-even、缩小时区域插值）；完成后刷新模板列表并提示适配分辨率 | 顶部“导入” → 文件选择 → 后端处理 → 画布重建并自动布局；冲突/失败对话框 | 前端只做上传与结果展示，重映射/缩放全在后端；**`branches[]` 内分支步骤的 ID 与 `depends_on` 必须同步重映射**（桌面版 `import_preset` 缺口，web_server 补，否则分支节点 ID 与源预设冲突） |
 
 #### 5.1.10 加速模式
 
@@ -233,8 +253,8 @@
 
 前端实现必须理解并维护以下关联关系，任何一项断裂都会导致与桌面版行为不一致：
 
-1. **ID 与依赖的联动**：步骤 ID 是边、`depends_on`、日志定位、复制/导入重映射的共同键。复制预设、导入预设、复制步骤、画布粘贴必须“ID 重生成 + `depends_on`/边重映射”原子完成；粘贴单个步骤时，复制件的 `depends_on` 若指向被复制步骤以外的步骤则保留，指向自身的环必须剔除。
-2. **顺序约束链**：执行顺序 = `preset.steps` 数组顺序 → 决定“依赖只能更早”、顺序号、自动布局主轴、`depends_on` 规范化基准。排序/删除/移动任一操作都先改数组、再规范化依赖，最后同步画布。
+1. **ID 与依赖的联动**：步骤 ID 是边、`depends_on`、日志定位、复制/导入重映射的共同键。复制预设、导入预设、复制步骤、画布粘贴必须“ID 重生成 + `depends_on`/边重映射”原子完成；粘贴单个步骤时，复制件的 `depends_on` 若指向被复制步骤以外的步骤则保留，指向自身的环必须剔除。**`branches[]` 内的分支步骤 ID 与 `depends_on` 必须同步重映射**（桌面版 `import_preset` / `_duplicate_preset` / `_duplicate_step` 仅重映射主流程步骤，属已知缺口，web_server 不复制该缺陷）。
+2. **顺序约束链**：执行顺序 = `preset.steps` 数组顺序 → 决定“依赖只能更早”、顺序号、自动布局主轴、`depends_on` 规范化基准；画布上由开始节点顺序链表达该顺序（§7.18）。排序/删除/移动任一操作都先改数组、再规范化依赖，最后同步画布。
 3. **分支与模板位置的耦合**：`branches` 按模板在列表中的**序号**序列化（`str(index)`）。前端编辑期按模板身份（文件名）挂载分支，保存时按位置序列化；删除/重排模板时必须同步迁移分支，否则运行期命中错位模板执行错分支。
 4. **设备分辨率贯穿全链路**：保存步骤（写入 `screen_resolution`）、导入预设（目标分辨率）、坐标换算（旧分辨率 → 新分辨率）、模板引用（各自 `screen_resolution`）。设备未连接时：无法保存坐标步骤、无法导入预设——前端必须与桌面版一致地阻断并说明原因。
 5. **运行快照与编辑锁**：运行前深拷贝预设；运行期间前端只读 + 后端 409，保证编辑不影响执行；停止请求只作用于当前运行快照。
@@ -295,7 +315,7 @@
 | `float` | 数字输入（允许小数） | |
 | `bool` | 开关/复选框 | |
 | `templates` | 模板多选列表 + 阈值滑块 | 每项 `{file, threshold, screen_resolution}` |
-| `preset` | 预设下拉 | 显示名称，保存时写入 `preset_id` 与 `preset_name` |
+| `preset` | 预设下拉 | 保存时写入 `preset_id` 与 `preset_name`；回显按 `preset_id` 匹配预设，`preset_name` 仅作显示回退（预设被重命名/删除后显示“（未找到）”并允许重新选择） |
 | `coordinate_axis=x/y` | 数字输入 + “从截图选取”按钮 | 打开截图拾取 |
 | `coordinate_offset=true` | 允许负数的坐标输入 | |
 
@@ -309,14 +329,16 @@ Vue Flow 的 nodes/edges 由 `configStore` 派生，通过 `v-model:nodes` 与 `
 
 ```js
 // 节点
-{ id: "step:{stepId}", type: "step:find_and_tap" | "group" | "subflow" | ...,
+{ id: "start" | "step:{stepId}" | "branch:{parentStepId}:{index}:{stepId}",
+  type: "start" | "step:find_and_tap" | "group" | "subflow" | ...,
   position: { x, y },          // 画布坐标系坐标
   selected: false,
-  data: { step, order, def, state } }
+  data: { step?, order, def?, state, branch? } }
+  // branch: { parentStepId, index, label }，仅分支节点携带（§7.6）
 
-// 边：一条 depends_on 依赖 = 一条边
-{ id: "edge:{sourceStepId}:{targetStepId}",
-  source: "step:{sourceStepId}",      // 被依赖的步骤（更早）
+// 边：一条 depends_on 依赖 = 一条边；顺序链边与分支连线见 §7.18 / §7.6
+{ id: "edge:{sourceId}:{targetId}",
+  source: "start" | "step:{sourceStepId}" | "branch:{parent}:{index}:{sourceStepId}",
   target: "step:{targetStepId}",      // 依赖它的步骤（更后）
   animated: false,                     // 运行中变为 true 表示流转
   style: { stroke } }
@@ -324,18 +346,20 @@ Vue Flow 的 nodes/edges 由 `configStore` 派生，通过 `v-model:nodes` 与 `
 
 规则：
 
-- **节点唯一 ID**：即步骤 ID（后端 `new_id()` 风格，32 位 hex UUID），新增/复制/导入时由前端生成，保证整个配置内全局唯一。
+- **节点唯一 ID**：步骤节点即步骤 ID（后端 `new_id()` 风格，32 位 hex UUID），分支节点为 `branch:{parentStepId}:{index}:{stepId}`，新增/复制/导入时由前端生成，保证整个配置内全局唯一。
+- **开始节点**：每个工作流画布默认带一个开始节点 `type:"start"`、ID 固定 `"start"`、`order=0`，不可删除、不可被依赖，是执行入口与顺序链起点（§7.18）。
+- **分支节点**：绑定模板步骤的 `branches` 以真实步骤节点呈现在画布，ID 格式 `branch:{parentStepId}:{index}:{stepId}`，经父节点的分支 handle 连线（§7.6）。
 - **节点坐标**：`position` 是画布坐标；像素坐标（设备坐标）类字段仍存 `params`，二者互不混淆。
 - **边唯一 ID**：`source:target` 组合；同一对节点之间只允许一条边（`depends_on` 是集合，重复连线自动去重）。
 - 选中状态由画布事件回写（`node-click` / `pane-click` 清空选择），供属性面板联动。
 
 ### 7.2 节点与边的语义映射
 
-- 每个 `Step` 是一个节点，`node.id = step.id`。
+- 每个工作流画布默认带一个开始节点 `start`（§7.18），是执行入口与顺序链起点；每个 `Step` 是一个步骤节点，`node.id = step.id`（分支节点见 §7.6）。
 - 依赖边：若步骤 B 的 `depends_on` 包含步骤 A，则画边 `A → B`（被依赖方指向依赖方）。
-- **执行顺序不是拓扑序，而是列表顺序**。画布必须保留每个节点上的“顺序号”（从 1 开始），这是运行器实际执行的顺序。节点拖拽改变位置时，顺序号不变，直到用户执行“按布局重排”（§7.5）。
+- **执行顺序 = 列表顺序 = 从开始节点出发的连线顺序**（§7.18）。画布必须保留每个节点上的“顺序号”（start 为 0，步骤从 1 开始），这是运行器实际执行的顺序；前端保证连线顺序与数组顺序同步。节点拖拽改变位置时，顺序号不变，直到用户执行“按布局重排”（§7.5）。
 - 节点可包含属性：
-  - `data`: `{ step: Step, order: number, def: StepDefinition, state: 'idle'|'running'|'done'|'failed'|'skipped' }`
+  - `data`: `{ step: Step, order: number, def: StepDefinition, state: 'idle'|'running'|'done'|'failed'|'skipped' }`；分支节点另含 `branch: { parentStepId, index, label }`（§7.6）。
   - 高亮色块由 `state` 驱动（运行中脉动、失败红、跳过灰）。
 
 ### 7.3 节点外观与交互
@@ -346,8 +370,11 @@ Vue Flow 的 nodes/edges 由 `configStore` 派生，通过 `v-model:nodes` 与 `
 | 标题行 | 顺序号徽标 + 步骤名称 + 启用/停用状态图标 |
 | 类型行 | 步骤类型 label + 失败处理徽标（`continue` 显示“可跳过”） |
 | 摘要行 | `step_summary` 等价摘要（坐标、模板文件名、次数等） |
-| 右侧 handle | 源点：输出依赖连线 |
+| 分支 handle | 识别节点右侧按分支分组的输出 handle：主输出 + 每模板分支一个（标签“分支 ①/②… + 模板文件名”），连线位置区分命中哪条分支（§7.6） |
+| 右侧 handle | 源点：输出依赖连线（顺序链边与依赖边共用） |
 | 左侧 handle | 目标点：接收依赖连线 |
+
+开始节点（`type:"start"`）外观：圆形/菱形入口节点，位于画布顶部，仅右侧输出 handle，无顺序号徽标（固定 0），详见 §7.18。
 
 节点操作（全部通过 Vue Flow 内建能力 + 键盘事件实现）：
 
@@ -364,7 +391,7 @@ Vue Flow 的 nodes/edges 由 `configStore` 派生，通过 `v-model:nodes` 与 `
 
 - 从节点右侧 handle 拖出连线，实时预览（Vue Flow connection line），允许状态下线为品牌色；即将落到非法目标时变红。
 - 松手时校验，全部通过才创建边：
-  1. 目标必须是节点左侧 handle（单向依赖，禁止反向连）。
+  1. 目标必须是节点左侧 handle（单向依赖，禁止反向连）；源点可以是普通步骤右侧 handle，或识别节点的分支 handle（§7.6）。
   2. source 顺序号必须小于 target（依赖只能指向更后的步骤），否则拒绝。
   3. 同一 `source → target` 已存在则忽略（去重）。
   4. 依赖链无环（因顺序号约束天然满足，仍保留环检测作为兜底校验）。
@@ -374,20 +401,27 @@ Vue Flow 的 nodes/edges 由 `configStore` 派生，通过 `v-model:nodes` 与 `
 
 ### 7.5 排序语义
 
-- 执行顺序 = `preset.steps` 数组顺序。编辑期间顺序变化只发生在三种操作：
+- 执行顺序 = `preset.steps` 数组顺序 = 从开始节点出发的连线顺序（§7.18）。编辑期间顺序变化只发生在四种操作：
   1. “上移/下移”按钮（调整数组，画布节点位置随之交换或重排）。
   2. 节点操作面板拖入画布 → 追加到列表末尾。
   3. “按布局重排”按钮：按节点 `position.y` 从上到下排序，同高度按 `x` 从左到右，重写数组顺序并重排画布位置，随后执行依赖规范化。
-- 任何排序操作后必须执行 `normalize_dependencies` 等价逻辑（依赖只能引用更早步骤）。
+  4. 直接重连顺序链（拖拽 `start` 出边或链段）：按新链序重写数组顺序，随后执行依赖规范化。
+- 任何顺序变化都会同步重画顺序链边（§7.18）；任何排序操作后必须执行 `normalize_dependencies` 等价逻辑（依赖只能引用更早步骤）。
 - 连线/删除节点产生的依赖变化即时回写 store 中的步骤数据，保存时整体提交。
 
 ### 7.6 分支与嵌套子流程
 
-`find_and_tap` / `find_and_multi_tap` 的 `branches` 是 `template_index -> Step[]` 映射，运行时若命中某模板则执行其分支后重新开始预设。这是“子流程”的天然形态：
+`find_and_tap` / `find_and_multi_tap` 的 `branches` 是 `template_index -> Step[]` 映射，运行时若命中某模板则执行其分支后重新开始预设。**分支不是弹层里的隐藏数据，而是工作流的一等公民**：绑定模板后，分支内容以真实步骤节点呈现在画布上，并通过专用的分支连线位置区分执行哪条分支。
 
-- **首版（分支弹层）**：节点右下角显示“分支 N 步”徽标，双击打开分支编辑弹层（复用步骤属性表单，内部为可拖拽排序的紧凑列表）。分支内步骤支持新增/编辑/复制/删除/排序。
-- **进阶（子流程节点）**：将分支入口渲染为 `SubflowNode`，点击进入子画布视图（同一编辑器实例切换数据源，面包屑导航返回）。
-- **序列化不变**：无论 UI 形态如何，子流程步骤仍按现有 `branches` 结构落盘，不改协议，后端无感知。
+- **分支节点**：`branches[template_index]` 中的每个 Step 转为画布节点，节点 ID = `branch:{parentStepId}:{index}:{stepId}`，`data.branch = { parentStepId, index, label }`（label 为模板文件名）。分支内步骤保持数组相对顺序，自动形成分支内的顺序链（§7.18 规则同样适用）。
+- **分支 handle（用连线的位置区分分支）**：父识别节点的右侧按分支分组输出 handle —— 主输出 handle + 每个模板分支一个 handle，handle 上标注“分支 ①/②… + 模板文件名”（截断显示，hover 显示全名）。从“分支 ②”的 handle 连线出去，即表示“命中第 2 个模板时执行这条分支”。
+- **分支连线**：父节点分支 handle → 分支首个步骤节点；分支步骤间为分支内顺序链。运行中命中某模板时，对应分支连线高亮流转（§7.17），与主流程高亮并存；多分支节点可同时呈现。
+- **多分支同轮执行**：同一轮截图多个模板同时命中且均配置分支时，按 `(y, x, 模板序号)` 顺序**依次执行**各分支（与 `steps.py:_run_recognition_taps` 一致），随后重新开始预设；画布上对应分支连线按执行次序依次高亮。
+- **嵌套分支（首版限制）**：分支内步骤允许再绑定模板并配置分支（引擎递归支持），但首版画布只展开**一层**分支节点，更深嵌套折叠为“分支 N 步”徽标，编辑时沿用分支弹层（§7.6 弹层入口）；序列化保持递归 `branches` 结构不变。
+- **交互与编辑**：分支节点支持与主流程节点相同的选中/编辑/复制/删除/排序；节点右下角显示来源徽标（“来自：{父节点名} · 分支 ②”）。分支节点不能被主流程节点依赖（只允许父节点分支 handle 连入），主流程节点也不可连入分支；删除父节点时级联清理其全部分支节点与连线。
+- **分支编辑弹层保留**：节点右键“编辑分支”弹层保留为快捷编辑入口，但工作流画布是分支的**权威呈现**，弹层修改即时同步画布。
+- **序列化不变**：保存时按父节点 + `index` 聚合回 `branches[template_index]` 结构落盘，不改协议，后端无感知；`branches` 仍按模板在列表中的序号序列化（§5.2 第 3 条），前端编辑期按模板身份挂载、保存时按位置序列化。
+- **进阶（子流程节点）**：分支较多时可将分支区域折叠为 `SubflowNode` 子流程入口，点击展开为上述画布形态；入口节点保留分支 handle 摘要，面包屑导航返回。
 
 ### 7.7 节点分组 / 泳道
 
@@ -404,6 +438,7 @@ Vue Flow 的 nodes/edges 由 `configStore` 派生，通过 `v-model:nodes` 与 `
 - `config.json` 只存数据协议字段，**不写入任何布局坐标、泳道归属、选中状态**（避免破坏 schema 2 兼容性和 Python 测试）。
 - 节点 `position` 与泳道 `groupOf` 存 localStorage：键 `layout:{presetId}`，值 `{ [stepId]: {x, y}, groupOf: {...} }`。
 - 缺失布局（新预设、导入预设、清空缓存）时自动布局：按步骤顺序纵向排列（同层可横向分支展开），每节点间距固定。
+- 开始节点（`start`）坐标不持久化，固定吸附画布顶部渲染（§7.18），不参与布局记忆。
 - 用户可“重置布局”。
 
 ### 7.9 画布操作与视图控制
@@ -462,6 +497,7 @@ Vue Flow 的核心优势在于节点即组件。采用“通用外壳 + 组合�
 ### 7.15 自动布局
 
 - 一键“自动排列”：分层布局 —— 以顺序号为主轴的纵向分层，同级依赖横向展开，交叉连线最少化。
+- 开始节点固定置于画布顶部作为入口锚点（order=0），不参与分层排序；顺序链沿主轴纵向排列，分支节点列于父节点右侧分支区域。
 - 泳道模式下：按泳道分列，泳道内自动纵向排列。
 - 自动布局后可“重置布局”回到手工状态；自动布局本身计入撤销历史（§7.13）。
 - 复杂流程图（节点 > 50）布局耗时超过 200ms 时异步执行并显示进度提示。
@@ -482,6 +518,41 @@ Vue Flow 的核心优势在于节点即组件。采用“通用外壳 + 组合�
 - 轮次（cycle）切换时所有节点状态重置为 `idle`，与引擎“每轮重置”语义一致。
 - 日志行带 `step_id`，点击日志可在画布中定位并 `fitView` 到该节点。
 
+### 7.18 开始节点与连线执行顺序
+
+每个工作流（预设画布）**默认带一个开始节点**（`type: "start"`，ID 固定 `"start"`，`order=0`），是执行入口与顺序链起点：
+
+- 外观：圆形/菱形入口节点，位于画布顶部（自动布局固定首列），不显示顺序号徽标，只有右侧输出 handle；节点内显示“开始”或预设名。
+- 不可删除、不可选中编辑参数；右键菜单仅提供“定位 / 重置到顶部”。复制/导入预设时自动重建。
+- **连线即执行顺序**：从开始节点拖出的连线定义执行入口；工作流默认维护一条“顺序链”`start → s₁ → s₂ → … → sₙ`（sᵢ = 数组顺序第 i 个步骤），顺序链边以细虚线渲染表达“执行顺序”，可折叠隐藏；无依赖的步骤从开始节点接入，作为入口连线。
+- 同步不变量：**连线顺序 ≡ `preset.steps` 数组顺序 ≡ 后端执行顺序**。三种变更路径由前端保证同步：
+  1. 新增步骤 → 接入顺序链末端；删除步骤 → 前后链重连；上移/下移、“按布局重排” → 排序后重画顺序链（§7.5）。
+  2. 直接重连顺序链（拖拽 `start` 出边或链段）→ 前端重写数组顺序并执行依赖规范化（§7.5 第 4 条）。
+  3. 拖拽节点位置只改坐标，不改顺序链与数组（§7.5 保持）。
+- 与依赖边的关系：`depends_on` 依赖边（A → B，实线）表达“B 必须在 A 之后执行”的前置约束，在顺序链之外叠加；因依赖只能指向更早步骤（§5.2.2），依赖边不会破坏链序。同一 `source → target` 的顺序链边与依赖边只保留一条（以依赖边为准，去重规则见 §7.4）。
+- 运行语义不变：后端引擎仍按 `preset.steps` 数组顺序执行（§7.2），开始节点与顺序链纯属工作流呈现层；运行中当前步骤沿顺序链高亮流转（§7.17）。
+
+### 7.19 现有预设 → 工作流转换（数据改造）
+
+构筑前端代码时**不手工重建数据**：以现有 `config.json` 预设为唯一数据源，由转换层（`flow/createFlow.js`）将现有预设内容“拷贝一份 + 改造”为工作流形态。转换是纯派生过程，不修改 `config.json`，直到用户显式保存。
+
+| 现有数据 | 工作流形态（转换规则） |
+| --- | --- |
+| 配置 / 预设 | `GET /api/config` 后，`selected_preset_id` 对应预设渲染为当前画布，其余预设保留为顶部下拉可切换 |
+| `preset.steps[]` 数组顺序 | 自动创建 `start` 节点（§7.18），生成顺序链 `start → s₁ → … → sₙ`；每个步骤转为步骤节点，`order = index+1`，参数（坐标、模板引用、`screen_resolution`、阈值、次数等）**原样拷贝**，不做任何语义改写 |
+| `step.depends_on` | 依赖边 A → B（实线）；与顺序链并存，去重规则见 §7.18 |
+| `find_and_tap` / `find_and_multi_tap.branches` | 按 `branches[template_index]` 展开为分支节点与分支连线（§7.6），分支内步骤保持相对顺序 |
+| `run_preset` | 普通步骤节点 + 预设下拉字段，行为不变（删除引用提示见 §5.1.2） |
+| 步骤停用 `enabled=false` | 节点置灰（§7.3），顺序链保留其位置 |
+| 模板引用 | 节点摘要行显示模板文件名/缩略图；分支 handle 标签显示模板文件名（§7.6） |
+
+转换约束与校验：
+
+1. 转换前先请求后端执行一次配置校验（`GET /api/config` 返回即已校验），转换过程前端不做 schema 判断。
+2. 分支节点 ID = `branch:{parentStepId}:{index}:{stepId}`，由父节点与分支序号唯一定位。
+3. 反向序列化（保存时）：顺序链重写数组顺序 → 依赖边聚合 `depends_on` → 分支连线聚合回 `branches[template_index]` → 得到与桌面版语义一致的 schema 2 配置；`preset_archive` 导入导出路径不受影响。
+4. 往返等价性（config → 工作流 → config）纳入 Vitest 单元测试（§19.2），作为转换层的回归基线。
+
 ## 8. API 设计
 
 ### 8.1 REST 端点
@@ -495,10 +566,12 @@ Vue Flow 的核心优势在于节点即组件。采用“通用外壳 + 组合�
 | `PUT` | `/api/config` | 原子保存配置（后端复用 `ConfigStore.save`） |
 | `GET` | `/api/step-definitions` | 步骤类型与字段定义（驱动动态表单） |
 | `GET` | `/api/presets` | 预设列表（轻量） |
-| `POST` | `/api/presets/{id}/duplicate` | 复制预设（ID 与 `depends_on` 重映射在后端完成） |
+| `POST` | `/api/presets/{id}/duplicate` | 复制预设（ID 与 `depends_on` 重映射在后端完成，**含 `branches[]` 分支步骤**） |
+| `GET` | `/api/presets/{id}/references` | 预设被 `run_preset` 步骤引用列表（**含分支内引用**；删除确认框数据源，§5.1.2） |
 | `POST` | `/api/run` | 启动执行（body: `{preset_id}`），校验设备与权限 |
 | `POST` | `/api/stop` | 请求停止（等价 `stop_event.set()`） |
-| `GET` | `/api/templates` | 模板列表（名称、尺寸、大小） |
+| `GET` | `/api/run/status` | 当前运行状态（重连后补齐视图：`state/preset_id/cycle/step_index/step_count`；未运行时返回 `idle`） |
+| `GET` | `/api/templates` | 模板列表（名称、尺寸、大小、被引用步骤） |
 | `GET` | `/api/templates/{name}/thumbnail` | 模板缩略图（二进制） |
 | `POST` | `/api/templates/upload` | 导入图片（multipart） |
 | `POST` | `/api/templates/capture` | 从截图框选新建模板（body: `{rect, name, threshold}`） |
@@ -507,6 +580,7 @@ Vue Flow 的核心优势在于节点即组件。采用“通用外壳 + 组合�
 | `GET` | `/api/archive/export?preset_id=` | 导出 `.adb-preset.zip`（二进制下载） |
 | `POST` | `/api/archive/import` | 导入预设包（multipart，后端完成校验/重映射/缩放） |
 | `PUT` | `/api/settings/acceleration` | 设置加速模式 |
+| `POST` | `/api/coords/scale` | 坐标换算（复用 `preset_archive._scale_step`，body: `{step, target_resolution}`，返回换算后的步骤；§9.2） |
 
 错误统一返回 `{"detail": "..."}`，HTTP 状态码区分 400（校验）/409（冲突）/503（设备/运行中冲突）。
 
@@ -522,7 +596,7 @@ Vue Flow 的核心优势在于节点即组件。采用“通用外壳 + 组合�
 {"type": "device", "data": {"connected": true, "resolution": {"width": 1080, "height": 2400}}}
 ```
 
-前端断线自动重连，重连后拉取 `GET /api/config` 与当前运行状态（`GET /api/run/status`）补齐视图。运行期间请求 `POST /api/run` 返回 409。
+前端断线自动重连，重连后拉取 `GET /api/config` 与当前运行状态（`GET /api/run/status`，见 §8.1）补齐视图。运行期间请求 `POST /api/run` 返回 409。事件数据由 web_server 生成：`step`/`status` 及 `log.step_id` 来自运行快照 + 日志解析（§8.3），engine 不加钩子。
 
 ### 8.3 运行控制线程模型
 
@@ -531,6 +605,8 @@ Vue Flow 的核心优势在于节点即组件。采用“通用外壳 + 组合�
 - `StopEvent`（`threading.Event`）替代 Tk 的停止按钮。
 - worker `Thread` 替代 `gui.py` 的 `AutomationConsole.worker`。
 - 日志回调改为“入队 → WS 广播”，不再使用 100ms 轮询队列；WS 断开时日志仍保留在内存环形缓冲（最近 200 条），重连后补发。
+- **步骤级事件来源（engine 零改动，§3.1）**：web_server 在 `log` 回调中解析引擎日志 —— “开始执行预设：…（N 个步骤，…）”行确定步数，`[i/N] 名称` 前缀行确定当前步骤序号；配合运行启动时的预设深拷贝快照（预设 ID → 步骤 ID/名称 映射）生成 `step`/`status`/带 `step_id` 的 `log` 事件；解析失败的行仅作为普通日志透传。
+- **运行快照覆盖全部预设**：启动运行时深拷贝**全部预设**（非仅选中预设）——`run_preset` 步骤执行期引用 `context.presets` 快照，保证运行中切换/编辑任何预设都不影响本次执行（桌面版 `_run` 传活配置对象，web_server 不复制）。
 
 ## 9. 截图与坐标交互
 
@@ -557,7 +633,7 @@ Vue Flow 的核心优势在于节点即组件。采用“通用外壳 + 组合�
 
 - 坐标字段旁“从截图选取”按钮打开截图编辑器，确认后回填字段值。
 - 新建/保存识别步骤时，前端要求提供设备当前分辨率并随保存提交 `screen_resolution`（后端也可校验补全，前端优先）。
-- 设备分辨率与步骤记录分辨率不一致时，编辑界面顶部提示“分辨率已变化，坐标按旧分辨率换算”的警告，换算由后端提供接口（复用 `preset_archive._scale_step` 逻辑）或前端按 X/Y 比例计算（ties-to-even 规则，与协议一致）。
+- 设备分辨率与步骤记录分辨率不一致时，编辑界面顶部提示“分辨率已变化，坐标按旧分辨率换算”的警告；换算统一由后端 `POST /api/coords/scale` 完成（复用 `preset_archive._scale_step`：X/Y 比例、`round()` 银行家舍入（负数同样适用）、非偏移字段钳制 `[0, w/h-1]`）。前端不自行实现换算 —— JS `Math.round` 对 0.5/负数向上取整，与 Python `round()`（ties-to-even）行为不一致。
 
 ## 10. 模板资源管理
 
@@ -570,7 +646,7 @@ Vue Flow 的核心优势在于节点即组件。采用“通用外壳 + 组合�
 | 导入图片 | `<input type=file>` → `POST /api/templates/upload` |
 | 重新截取 | 对选中模板打开截图编辑器 → `POST /api/templates/{name}/recapture` |
 | 删除 | `DELETE`，前端提示“引用该模板的步骤将无法识别” |
-| 引用统计 | 后端返回被哪些步骤引用，列表展示 |
+| 引用统计 | `GET /api/templates` 返回被哪些步骤引用（**含分支内步骤**），列表展示 |
 
 识别步骤的属性表单中“模板选择器”复用该数据源，支持多选、逐个设置阈值（`0.0~1.0` 滑块）、移除。
 
@@ -586,7 +662,7 @@ Vue Flow 的核心优势在于节点即组件。采用“通用外壳 + 组合�
 ## 12. 导入导出
 
 - 导出：`GET /api/archive/export?preset_id=` 返回 `application/zip`，前端触发浏览器下载，文件名为 `{preset_name}.adb-preset.zip`（非法文件名字符由后端或前端替换）。
-- 导入：`<input type=file accept=".zip">` → `POST /api/archive/import`；后端完成安全校验、ID/依赖重映射、分辨率适配与模板冲突处理；成功后前端刷新画布并自动布局，冲突/失败原因以对话框展示。
+- 导入：`<input type=file accept=".zip">` → `POST /api/archive/import`；后端完成安全校验、ID/依赖重映射（**含 `branches[]` 分支步骤，桌面版缺口见 §5.2 第 1 条**）、分辨率适配与模板冲突处理；成功后前端刷新画布并自动布局，冲突/失败原因以对话框展示。
 
 ## 13. 前端工程结构
 
@@ -616,8 +692,10 @@ web/
       uiStore.js            # 只读模式、面板折叠、选中状态等 UI 状态
     components/
       nodes/                # Vue Flow 自定义节点
+        StartNode.vue       # 开始节点（执行入口，仅输出 handle，§7.18）
         StepNode.vue        # 通用节点外壳（选中/高亮/handles/快捷操作）
         StepNodeContent.vue # 类型行/摘要/徽标
+        BranchNode.vue      # 分支节点（branch:{parent}:{index}:{stepId}，§7.6）
         GroupNode.vue       # 泳道容器节点
         SubflowNode.vue     # 子流程入口节点
         BranchBadge.vue
@@ -642,8 +720,8 @@ web/
     constants/
       nodeAppearance.js       # 类型→颜色/图标
     flow/
-      createFlow.js           # Step[] ↔ Vue Flow nodes/edges 转换
-      connections.js          # 连线校验（方向/去重/环检测）
+      createFlow.js           # Step[] ↔ Vue Flow nodes/edges 转换（开始节点顺序链 + 分支连线，§7.19）
+      connections.js          # 连线校验（方向/去重/环检测/分支 handle 归属）
       exportImport.js         # 画布 JSON 导出/导入
 ```
 
@@ -682,7 +760,8 @@ web/
 - 开发模式：`vite dev`（默认 5173）代理 `/api` 到后端（8000），后端负责真机 ADB 操作。
 - 生产模式：`vite build` 产物放入后端静态目录，FastAPI 挂载 `StaticFiles`；PyInstaller 打包时包含 `web/dist`、`model_automation`、`adb.exe`，用户运行单一 exe 后浏览器访问 `http://127.0.0.1:8000`（启动时自动打开默认浏览器）。
 - 单用户本地使用，不做鉴权；服务默认只监听 `127.0.0.1`。
-- 浏览器要求：现代 Chromium/Edge 内核（截图交互使用 Canvas API），无需安装任何插件。
+- 浏览器要求：现代 Chromium/Edge 内核（截图交互使用 Canvas API，玻璃态依赖 `backdrop-filter`），无需安装任何插件。
+- 新增后端依赖并更新构建链：`requirements.txt` 增加 `fastapi`、`uvicorn`、`websockets`、`python-multipart`；`main.py` 由 `run_app()`（Tkinter）改为启动 web_server（§3.1）；`ADB-Automation.spec` 增加 `web/dist` 静态资源与新增依赖收集（PyInstaller hiddenimports）。
 
 ## 17. 部署形态选项
 
@@ -709,7 +788,7 @@ web/
 
 ### 19.1 后端（保留与新增）
 
-- 保留现有 39 项 Python 单元测试，`engine/vision/config/preset_archive` 逻辑零改动。
+- 保留现有 68 项 Python 单元测试，`engine/vision/config/preset_archive` **执行逻辑**零改动（`vision.py` 仅移除 `select_*` 弹窗函数，`gui.py` 整体移除并先迁移 `normalize_dependencies`/`reorder_steps`，见 §3.1）。
 - 新增 `web_server` 接口测试：配置 CRUD、运行/停止状态机、模板上传与捕获、导入导出、step-definitions 输出。
 - 新增 WS 事件顺序与重连补发测试。
 
@@ -731,11 +810,11 @@ web/
 | 阶段 | 内容 | 交付物 |
 | --- | --- | --- |
 | 0 | 搭 Vite 项目骨架 + FastAPI 桥接服务 + `/api/step-definitions` + 配置 CRUD | 空画布页面能读配置、新建步骤并保存 |
-| 1 | Vue Flow 节点/边渲染、Step↔flow 转换、`v-model` 双向绑定、平移缩放、Minimap/Controls/Background、自动布局、依赖连线规则 | 画布可完整编排一个预设并保存 |
-| 2 | 动态属性表单、节点操作面板（拖拽添加）、属性配置面板、模板选择器、模板管理抽屉 | 所有步骤类型可编辑 |
+| 1 | Vue Flow 节点/边渲染、Step↔flow 转换、`v-model` 双向绑定、平移缩放、Minimap/Controls/Background、自动布局、依赖连线规则、**开始节点与顺序链（§7.18）、现有预设→工作流转换（§7.19）** | 画布可完整编排一个预设并保存 |
+| 2 | 动态属性表单、节点操作面板（拖拽添加）、属性配置面板、模板选择器、模板管理抽屉、**分支节点与分支 handle（§7.6）** | 所有步骤类型可编辑，分支以工作流形态呈现 |
 | 3 | 截图编辑器（点选/框选/滑动）、模板捕获与重新截取 | 坐标与模板工作流闭环 |
 | 4 | 运行控制（WS 日志、节点/连线高亮、停止）、执行状态追踪 | 实时反馈闭环 |
-| 5 | 撤销/重做、画布 JSON 导入导出、只读/演示模式、泳道分组、分支子流程形态 | 编辑器级体验 |
+| 5 | 撤销/重做、画布 JSON 导入导出、只读/演示模式、泳道分组、嵌套分支折叠与 `SubflowNode` 子流程入口（§7.6） | 编辑器级体验 |
 | 6 | 预设包导入导出（`.adb-preset.zip`）、生产构建、PyInstaller 打包、性能与兼容性收尾 | 可分发版本 |
 
 ## 21. 主要风险
@@ -757,7 +836,7 @@ web/
 | --- | --- |
 | W-01 | 不再依赖 Tkinter 界面，所有编辑、模板、运行操作在浏览器完成 |
 | W-02 | 画布节点与连线准确表达步骤顺序与前置依赖，保存后 `config.json` 语义与桌面版一致 |
-| W-03 | 依赖、失败控制、循环、停止语义与后端引擎行为完全一致（39 项后端测试保持通过） |
+| W-03 | 依赖、失败控制、循环、停止语义与后端引擎行为完全一致（68 项后端测试保持通过） |
 | W-04 | 截图点选/框选/滑动在浏览器内完成，坐标精确落回原始设备像素 |
 | W-05 | 运行中日志实时推送、当前步骤节点高亮、可随时停止 |
 | W-06 | 桌面版历史 `config.json` 与模板目录可直接使用 |
@@ -772,6 +851,9 @@ web/
 | W-15 | 一键自动布局可用，复杂流程图布局清晰 |
 | W-16 | 只读/演示模式锁定全部编辑能力，仅可平移缩放与查看 |
 | W-17 | 泳道分组可用：节点可拖入/拖出泳道，泳道随成员自适应 |
-| W-18 | 识别步骤的分支以子流程形态编辑（首版弹层，进阶子画布），协议不变 |
+| W-18 | 识别步骤的分支以工作流节点形态呈现并可编辑（增删改/排序/复制与主流程一致），编辑弹层与画布双向同步，协议不变（§7.6） |
 | W-19 | 运行中当前节点与流转连线实时高亮，轮次切换状态重置 |
 | W-20 | §5.1 逐项清单与 §5.3 复现核对清单全部落实：每项桌面操作在前端有等价入口，行为与桌面版一致 |
+| W-21 | 每个工作流默认带开始节点；从开始节点出发的连线顺序与 `preset.steps` 数组顺序、后端执行顺序三者一致（§7.18） |
+| W-22 | 绑定模板的步骤分支以工作流节点 + 分支 handle 连线呈现，命中模板时对应分支连线高亮，保存后仍为 `branches` 结构（§7.6） |
+| W-23 | 前端整体符合 §4.1 玻璃态风格规范：半透明毛玻璃面板、清晰视觉层次、桌面端固定布局（不响应式）、WCAG AA 可访问性 |

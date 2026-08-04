@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
@@ -99,7 +100,10 @@ def _run_branch(
     if context.engine is None:
         return StepResult(False, "运行环境不支持分支步骤")
     branch_preset = Preset(name=f"分支：{label}", steps=branch, loop_count=1)
-    report = context.engine.run(branch_preset, context)
+    sub_context = replace(context, allow_external_jump=True)
+    report = context.engine.run(branch_preset, sub_context)
+    if report.jump_to:
+        return StepResult(True, f"分支“{label}”执行完成", jump_to=report.jump_to)
     if report.status == "completed":
         return StepResult(True, f"分支“{label}”执行完成")
     if report.status == "stopped":
@@ -148,6 +152,12 @@ def _run_recognition_taps(
                     continue
                 if not branch_result.success:
                     return branch_result
+                if branch_result.jump_to:
+                    return StepResult(
+                        True,
+                        f"匹配 {branch_filename}，分支执行后返回",
+                        jump_to=branch_result.jump_to,
+                    )
                 branches_done.append(branch_filename)
             if branches_done:
                 names = "、".join(branches_done)
@@ -157,15 +167,17 @@ def _run_recognition_taps(
                     restart=True,
                 )
 
-            offset_x = _integer(step.params, "offset_x", 0)
-            offset_y = _integer(step.params, "offset_y", 0)
-            target_x = match.x + offset_x
-            target_y = match.y + offset_y
+            if bool(step.params.get("custom_click", False)):
+                target_x = _integer(step.params, "click_x", 540)
+                target_y = _integer(step.params, "click_y", 1000)
+            else:
+                target_x = match.x
+                target_y = match.y
             screen_height, screen_width = screen.shape[:2]
             if not (0 <= target_x < screen_width and 0 <= target_y < screen_height):
                 return StepResult(
                     False,
-                    f"偏移后坐标 ({target_x}, {target_y}) 超出屏幕范围",
+                    f"点击坐标 ({target_x}, {target_y}) 超出屏幕范围",
                 )
             for click_index in range(click_count):
                 context.device.tap(target_x, target_y)
@@ -207,13 +219,22 @@ def _run_recognition_taps(
 
 
 def run_find_and_tap(step: Step, context: RuntimeContext) -> StepResult:
+    mode = step.params.get("tap_mode")
+    if mode is None and step.kind == "find_and_multi_tap":
+        mode = "multi"
+    if mode == "multi":
+        click_count = _integer(step.params, "click_count", 2)
+        click_interval = max(0.0, _number(step.params, "click_interval", 0.1))
+        return _run_recognition_taps(step, context, click_count, click_interval)
+    if mode not in {None, "single"}:
+        return StepResult(False, "识别后操作方式无效")
     return _run_recognition_taps(step, context, 1, 0.0)
 
 
 def run_find_and_multi_tap(step: Step, context: RuntimeContext) -> StepResult:
-    click_count = _integer(step.params, "click_count", 2)
-    click_interval = max(0.0, _number(step.params, "click_interval", 0.1))
-    return _run_recognition_taps(step, context, click_count, click_interval)
+    params = deepcopy(step.params)
+    params["tap_mode"] = "multi"
+    return run_find_and_tap(replace(step, kind="find_and_tap", params=params), context)
 
 
 def run_run_preset(step: Step, context: RuntimeContext) -> StepResult:
@@ -236,8 +257,11 @@ def run_run_preset(step: Step, context: RuntimeContext) -> StepResult:
     sub_context = replace(
         context,
         preset_path=context.preset_path + ((target.id, target.name),),
+        allow_external_jump=True,
     )
     report = context.engine.run(sub_preset, sub_context)
+    if report.jump_to:
+        return StepResult(True, f"预设“{target.name}”执行完成", jump_to=report.jump_to)
     if report.status == "completed":
         return StepResult(True, f"预设“{target.name}”执行完成")
     if report.status == "stopped":
@@ -260,38 +284,37 @@ RECOGNITION_SEARCH_FIELDS = (
     FieldSpec("y2", "滑动终点 Y", "int", 800, "y"),
     FieldSpec("duration", "滑动时长（毫秒）", "int", 300),
 )
-RECOGNITION_OFFSET_FIELDS = (
-    FieldSpec("offset_x", "点击偏移 X", "int", 0, "x", True),
-    FieldSpec("offset_y", "点击偏移 Y", "int", 0, "y", True),
+RECOGNITION_TARGET_FIELDS = (
+    FieldSpec("custom_click", "自定义点击", "bool", False),
+    FieldSpec("click_x", "自定义点击 X", "int", 540, "x"),
+    FieldSpec("click_y", "自定义点击 Y", "int", 1000, "y"),
+)
+
+RECOGNITION_ACTION_FIELDS = (
+    FieldSpec(
+        "tap_mode",
+        "识别后操作",
+        "choice",
+        "single",
+        options=(("single", "点击"), ("multi", "连击")),
+    ),
+    FieldSpec("click_count", "连击次数", "int", 2),
+    FieldSpec("click_interval", "连击间隔（秒）", "float", 0.1),
 )
 
 
 REGISTRY.register(
     StepDefinition(
         key="find_and_tap",
-        label="识别模板并点击",
+        label="识别模板并点击/连击",
         can_fail=True,
         fields=RECOGNITION_SEARCH_FIELDS
-        + RECOGNITION_OFFSET_FIELDS
+        + RECOGNITION_TARGET_FIELDS
+        + RECOGNITION_ACTION_FIELDS
         + (
             FieldSpec("wait_after", "点击后等待（秒）", "float", 0.0),
         ),
         runner=run_find_and_tap,
-    )
-)
-REGISTRY.register(
-    StepDefinition(
-        key="find_and_multi_tap",
-        label="识别模板并连击",
-        can_fail=True,
-        fields=RECOGNITION_SEARCH_FIELDS
-        + RECOGNITION_OFFSET_FIELDS
-        + (
-            FieldSpec("click_count", "连击次数", "int", 2),
-            FieldSpec("click_interval", "连击间隔（秒）", "float", 0.1),
-            FieldSpec("wait_after", "连击后等待（秒）", "float", 0.0),
-        ),
-        runner=run_find_and_multi_tap,
     )
 )
 REGISTRY.register(
@@ -348,6 +371,38 @@ REGISTRY.register(
 )
 
 
+def step_definitions(registry: StepRegistry = REGISTRY) -> list[dict[str, Any]]:
+    definitions: list[dict[str, Any]] = []
+    for definition in registry.all():
+        fields = []
+        for field in definition.fields:
+            serialized = {
+                "key": field.key,
+                "label": field.label,
+                "kind": field.kind,
+                "default": deepcopy(field.default),
+            }
+            if field.coordinate_axis is not None:
+                serialized["coordinate_axis"] = field.coordinate_axis
+            if field.coordinate_offset:
+                serialized["coordinate_offset"] = True
+            if field.options:
+                serialized["options"] = [
+                    {"value": value, "label": label}
+                    for value, label in field.options
+                ]
+            fields.append(serialized)
+        definitions.append(
+            {
+                "key": definition.key,
+                "label": definition.label,
+                "can_fail": definition.can_fail,
+                "fields": fields,
+            }
+        )
+    return definitions
+
+
 def step_summary(step: Step) -> str:
     params = step.params
     if step.kind == "wait":
@@ -361,7 +416,7 @@ def step_summary(step: Step) -> str:
         )
     if step.kind == "run_preset":
         return str(params.get("preset_name", "") or "（未选择预设）")
-    if step.kind in {"find_and_tap", "find_and_multi_tap"}:
+    if step.kind == "find_and_tap":
         names = [
             str(item.get("file", ""))
             for item in params.get("templates", [])
@@ -369,7 +424,7 @@ def step_summary(step: Step) -> str:
         ]
         parts = [", ".join(names) or "无模板"]
         parts.append("全部匹配" if params.get("require_all") else "任一匹配即可")
-        if step.kind == "find_and_multi_tap":
+        if params.get("tap_mode") == "multi":
             parts.append(f"连击 {params.get('click_count', 2)} 次")
         else:
             try:
@@ -377,7 +432,12 @@ def step_summary(step: Step) -> str:
             except (TypeError, ValueError):
                 attempts = 1
             parts.append("无限重试" if attempts <= 0 else f"{attempts} 次")
-        parts.append(f"偏移 ({params.get('offset_x', 0)}, {params.get('offset_y', 0)})")
+        if params.get("custom_click"):
+            parts.append(f"点击 ({params.get('click_x', 540)}, {params.get('click_y', 1000)})")
+        else:
+            parts.append("点击识别位置")
+        if params.get("return_to"):
+            parts.append("返回连接")
         if params.get("tap_between"):
             parts.append(
                 "重试前点击 "

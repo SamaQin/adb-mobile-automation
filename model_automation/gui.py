@@ -13,6 +13,7 @@ from .config import ConfigError, ConfigStore, PROJECT_ROOT, TEMPLATE_DIR
 from .device import AdbClient, DeviceError
 from .engine import RuntimeContext, StepEngine
 from .models import AppConfig, Preset, Step
+from .operations import normalize_dependencies, reorder_steps
 from .preset_archive import (
     PresetArchiveError,
     export_preset,
@@ -43,28 +44,6 @@ def image_window_bounds(widget: tk.Misc) -> tuple[int, int]:
     screen_width = widget.winfo_screenwidth()
     screen_height = widget.winfo_screenheight()
     return max(1, int(screen_width * 0.90)), max(1, int(screen_height * 0.82))
-
-
-def normalize_dependencies(preset: Preset) -> None:
-    for index, step in enumerate(preset.steps):
-        earlier_ids = {earlier.id for earlier in preset.steps[:index]}
-        step.depends_on = [
-            dep for dep in step.depends_on if dep in earlier_ids
-        ]
-
-
-def reorder_steps(preset: Preset, ordered_step_ids: list[str]) -> bool:
-    current_ids = [step.id for step in preset.steps]
-    if ordered_step_ids == current_ids:
-        return False
-    if len(ordered_step_ids) != len(current_ids) or set(ordered_step_ids) != set(
-        current_ids
-    ):
-        raise ValueError("步骤顺序与当前预设不一致")
-    steps_by_id = {step.id: step for step in preset.steps}
-    preset.steps = [steps_by_id[step_id] for step_id in ordered_step_ids]
-    normalize_dependencies(preset)
-    return True
 
 
 class StepDialog(tk.Toplevel):
@@ -251,6 +230,16 @@ class StepDialog(tk.Toplevel):
                     state="readonly",
                     width=18,
                 )
+            elif spec.kind == "choice":
+                choices = dict(spec.options)
+                variable = tk.StringVar(value=choices.get(str(value), str(value)))
+                widget = ttk.Combobox(
+                    self.fields_frame,
+                    textvariable=variable,
+                    values=list(choices.values()),
+                    state="readonly",
+                    width=18,
+                )
             elif spec.kind == "bool":
                 variable: tk.Variable = tk.BooleanVar(value=bool(value))
                 widget = ttk.Checkbutton(self.fields_frame, variable=variable)
@@ -275,14 +264,19 @@ class StepDialog(tk.Toplevel):
                 text="从设备截图拖动选择",
                 command=self._pick_swipe_range,
             ).grid(row=row, column=1, sticky="w", pady=(5, 0))
-        elif definition.key in {"find_and_tap", "find_and_multi_tap"}:
+        elif definition.key == "find_and_tap":
             retry_actions = ttk.Frame(self.fields_frame)
             retry_actions.grid(row=row, column=1, sticky="w", pady=(5, 0))
             ttk.Button(
                 retry_actions,
+                text="识别后点击选点",
+                command=self._pick_recognition_target_position,
+            ).pack(side="left")
+            ttk.Button(
+                retry_actions,
                 text="重试前点击选点",
                 command=self._pick_retry_tap_position,
-            ).pack(side="left")
+            ).pack(side="left", padx=(6, 0))
             ttk.Button(
                 retry_actions,
                 text="重试前滑动选点",
@@ -515,6 +509,9 @@ class StepDialog(tk.Toplevel):
     def _pick_retry_tap_position(self) -> None:
         self._pick_point("tap_between_x", "tap_between_y")
 
+    def _pick_recognition_target_position(self) -> None:
+        self._pick_point("click_x", "click_y")
+
     def _pick_point(self, x_key: str, y_key: str) -> None:
         try:
             image = self.adb.screenshot()
@@ -702,15 +699,21 @@ class StepDialog(tk.Toplevel):
                 )
                 params[spec.key] = preset_id
                 params["preset_name"] = selected_name
+            elif spec.kind == "choice":
+                selected_label = str(variable.get()).strip()
+                params[spec.key] = next(
+                    (value for value, label in spec.options if label == selected_label),
+                    selected_label,
+                )
             else:
                 params[spec.key] = str(variable.get()).strip()
 
-        if definition.key in {"find_and_tap", "find_and_multi_tap"}:
+        if definition.key == "find_and_tap":
             if params["attempts"] < 0:
                 raise ValueError("识别次数必须大于或等于 0（0 表示无限重试）。")
             if params["interval"] < 0 or params["wait_after"] < 0:
                 raise ValueError("等待时间不能小于 0。")
-            if definition.key == "find_and_multi_tap":
+            if params.get("tap_mode") == "multi":
                 if params["click_count"] < 1:
                     raise ValueError("连击次数必须大于 0。")
                 if params["click_interval"] < 0:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -8,7 +9,14 @@ from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 import cv2
 import numpy as np
 
-from .models import Preset, Step, new_id
+from .models import Preset, Step
+from .operations import (
+    ValidationError,
+    iter_steps,
+    remap_preset_ids,
+    validate_preset_structure,
+    validate_template_filename,
+)
 from .steps import REGISTRY
 
 
@@ -25,17 +33,7 @@ class PresetArchiveError(RuntimeError):
 
 
 def _iter_steps(preset: Preset):
-    for step in preset.steps:
-        yield step
-        branches = step.params.get("branches", {})
-        if not isinstance(branches, dict):
-            continue
-        for raw_list in branches.values():
-            if not isinstance(raw_list, list):
-                continue
-            for raw in raw_list:
-                if isinstance(raw, dict):
-                    yield Step.from_dict(raw)
+    yield from iter_steps(preset)
 
 
 def _template_names(preset: Preset) -> list[str]:
@@ -56,29 +54,17 @@ def _template_names(preset: Preset) -> list[str]:
 
 
 def _validate_template_name(filename: str) -> None:
-    if (
-        not filename
-        or filename != Path(filename).name
-        or "/" in filename
-        or "\\" in filename
-    ):
-        raise PresetArchiveError(f"模板文件名无效：{filename}")
-    if Path(filename).suffix.lower() not in IMAGE_EXTENSIONS:
-        raise PresetArchiveError(f"不支持的模板图片格式：{filename}")
-    if (
-        any(character in '<>:"/\\|?*' or ord(character) < 32 for character in filename)
-        or filename.endswith((" ", "."))
-    ):
-        raise PresetArchiveError(f"模板文件名不兼容 Windows：{filename}")
-    reserved = {"CON", "PRN", "AUX", "NUL"}
-    reserved.update(f"COM{index}" for index in range(1, 10))
-    reserved.update(f"LPT{index}" for index in range(1, 10))
-    windows_base = filename.split(".", 1)[0].rstrip(" .").upper()
-    if windows_base in reserved:
-        raise PresetArchiveError(f"模板文件名不兼容 Windows：{filename}")
+    try:
+        validate_template_filename(filename)
+    except ValidationError as exc:
+        raise PresetArchiveError(str(exc)) from exc
 
 
 def _validate_preset_for_export(preset: Preset) -> None:
+    try:
+        validate_preset_structure(preset)
+    except ValidationError as exc:
+        raise PresetArchiveError(str(exc)) from exc
     missing_resolution: list[str] = []
     for step in _iter_steps(preset):
         definition = REGISTRY.get(step.kind)
@@ -238,6 +224,37 @@ def _scale_step(step: Step, target_resolution: tuple[int, int]) -> tuple[float, 
     return scale_x, scale_y
 
 
+def scale_step(step: Step, target_resolution: tuple[int, int]) -> Step:
+    """Return a scaled deep copy, including all nested branch steps."""
+    try:
+        target_width, target_height = map(int, target_resolution)
+    except (TypeError, ValueError) as exc:
+        raise PresetArchiveError("目标屏幕分辨率无效") from exc
+    if target_width <= 0 or target_height <= 0:
+        raise PresetArchiveError("目标屏幕分辨率必须大于 0")
+    target = (target_width, target_height)
+    try:
+        validate_preset_structure(
+            Preset(name="scale", steps=[step]), strict_dependencies=False
+        )
+    except ValidationError as exc:
+        raise PresetArchiveError(str(exc)) from exc
+    scaled = Step.from_dict(deepcopy(step.to_dict()))
+    _scale_step(scaled, target)
+    branches = scaled.params.get("branches", {})
+    if isinstance(branches, dict):
+        for raw_steps in branches.values():
+            if not isinstance(raw_steps, list):
+                continue
+            for index, raw in enumerate(raw_steps):
+                if not isinstance(raw, dict):
+                    continue
+                raw_steps[index] = scale_step(
+                    Step.from_dict(raw), target
+                ).to_dict()
+    return scaled
+
+
 def _template_resolution(
     item: dict[str, object], fallback: tuple[int, int]
 ) -> tuple[int, int]:
@@ -369,10 +386,6 @@ def import_preset(
     if target_width <= 0 or target_height <= 0:
         raise PresetArchiveError("当前设备分辨率无效")
     preset, assets = _read_archive(source)
-    old_ids = [step.id for step in preset.steps]
-    if len(old_ids) != len(set(old_ids)):
-        raise PresetArchiveError("预设包包含重复的步骤 ID")
-
     existing: dict[str, tuple[str, bytes]] = {}
     if template_dir.exists():
         try:
@@ -395,16 +408,13 @@ def import_preset(
             assets,
         )
 
-    id_remap = {step_id: new_id() for step_id in old_ids}
-    seen: set[str] = set()
-    for step, old_id in zip(preset.steps, old_ids):
-        invalid_dependencies = [dep for dep in step.depends_on if dep not in seen]
-        if invalid_dependencies:
-            raise PresetArchiveError(f"步骤“{step.name}”包含无效的前置步骤")
-        step.id = id_remap[old_id]
-        step.depends_on = [id_remap[dep] for dep in step.depends_on]
-        seen.add(old_id)
-    preset.id = new_id()
+    try:
+        remap_preset_ids(preset, strict_dependencies=True)
+    except ValidationError as exc:
+        message = str(exc)
+        if message == "包含重复的步骤 ID":
+            message = "预设包包含重复的步骤 ID"
+        raise PresetArchiveError(message) from exc
 
     temporary_paths: list[tuple[Path, Path]] = []
     try:

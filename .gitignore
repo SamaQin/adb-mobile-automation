@@ -1,3 +1,22 @@
-tests
+# folder
+.idea
+.venv
 build
 dist
+templates_file
+docs
+web/node_modules
+web/artifacts
+web/dist
+web/test-results
+web/playwright-report
+__pycache__/
+.pytest_cache/
+
+
+# file
+NUL
+config.json
+config.json.tmp
+*.py[cod]
+*.log

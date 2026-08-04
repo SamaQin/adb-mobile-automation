@@ -16,6 +16,7 @@ class FieldSpec:
     default: Any
     coordinate_axis: str | None = None
     coordinate_offset: bool = False
+    options: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

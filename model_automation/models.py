@@ -9,6 +9,20 @@ def new_id() -> str:
     return uuid4().hex
 
 
+def canonical_step_kind(kind: str, params: dict[str, Any]) -> str:
+    if kind == "find_and_multi_tap":
+        params.setdefault("tap_mode", "multi")
+        kind = "find_and_tap"
+    if kind == "find_and_tap":
+        params.setdefault("tap_mode", "single")
+        params.setdefault("custom_click", False)
+        params.setdefault("click_x", 540)
+        params.setdefault("click_y", 1000)
+        params.pop("offset_x", None)
+        params.pop("offset_y", None)
+    return kind
+
+
 @dataclass
 class Step:
     name: str
@@ -32,10 +46,12 @@ class Step:
             if width <= 0 or height <= 0:
                 raise ValueError("步骤屏幕分辨率必须大于 0")
             screen_resolution = (width, height)
+        params = dict(data.get("params") or {})
+        kind = canonical_step_kind(str(data.get("kind") or "wait"), params)
         return cls(
             id=str(data.get("id") or new_id()),
             name=str(data.get("name") or "未命名步骤"),
-            kind=str(data.get("kind") or "wait"),
+            kind=kind,
             enabled=bool(data.get("enabled", True)),
             on_failure=(
                 "continue" if data.get("on_failure") == "continue" else "stop"
@@ -45,7 +61,7 @@ class Step:
                 for item in (data.get("depends_on") or [])
                 if str(item).strip()
             ],
-            params=dict(data.get("params") or {}),
+            params=params,
             screen_resolution=screen_resolution,
         )
 

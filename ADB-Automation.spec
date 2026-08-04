@@ -1,12 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_submodules
+
 
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=[
+        ("adb.exe", "."),
+        ("AdbWinApi.dll", "."),
+        ("AdbWinUsbApi.dll", "."),
+    ],
+    datas=[("web/dist", "web/dist")],
+    hiddenimports=(
+        collect_submodules("fastapi")
+        + collect_submodules("uvicorn")
+        + collect_submodules("websockets")
+    ),
     hookspath=[],
     runtime_hooks=[],
     excludes=[],
