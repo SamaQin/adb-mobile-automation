@@ -75,7 +75,8 @@ dist\ADB-Automation\ADB-Automation.exe
 
 ### 分发与运行
 
-- 把 `dist\ADB-Automation\` 整个文件夹拷到目标机器即可运行，无需安装 Python 或 Node.js。
+- 把 `dist\ADB-Automation\` **整个文件夹**拷到目标机器即可运行，无需安装 Python 或 Node.js。该目录是一体的：`ADB-Automation.exe` 依赖同目录下的动态库、Python 运行时和 `web\dist` 静态资源，**不能只拷贝 exe 单独运行**。
+- 目标位置建议放在任意有读写权限的目录（例如 `D:\ADB-Automation` 或桌面上的专用文件夹）。不要放在 `C:\Program Files` 等受限目录，因为程序要在 exe 所在目录创建并读写用户数据。
 - 双击 `ADB-Automation.exe` 启动，服务默认监听 `http://127.0.0.1:8001` 并自动打开浏览器；需要改端口或不开浏览器时，在命令行运行：
   ```bat
   ADB-Automation.exe --port 8080 --no-browser
@@ -86,6 +87,7 @@ dist\ADB-Automation\ADB-Automation.exe
 ### 常见问题
 
 - 打包后启动失败：多为 `web\dist` 不是最新，先执行 `npm run build` 再打包。
+- 双击启动后没有控制台窗口属正常现象（窗口模式打包，日志不会显示）；如需查看启动日志或排查问题，在命令行中运行 `ADB-Automation.exe` 即可看到输出。
 - 端口被占用：换 `--port` 启动。
 - 目标机器无 ADB 驱动：程序已内置 `adb.exe`，但需在系统里装好手机对应厂商的 USB 驱动，并开启 USB 调试授权。
 

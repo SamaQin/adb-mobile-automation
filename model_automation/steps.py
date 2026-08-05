@@ -173,6 +173,8 @@ def _run_recognition_taps(
             else:
                 target_x = match.x
                 target_y = match.y
+            target_x += _integer(step.params, "offset_x", 0)
+            target_y += _integer(step.params, "offset_y", 0)
             screen_height, screen_width = screen.shape[:2]
             if not (0 <= target_x < screen_width and 0 <= target_y < screen_height):
                 return StepResult(
@@ -289,6 +291,10 @@ RECOGNITION_TARGET_FIELDS = (
     FieldSpec("click_x", "自定义点击 X", "int", 540, "x"),
     FieldSpec("click_y", "自定义点击 Y", "int", 1000, "y"),
 )
+RECOGNITION_OFFSET_FIELDS = (
+    FieldSpec("offset_x", "点击偏移 X", "int", 0, "x", True),
+    FieldSpec("offset_y", "点击偏移 Y", "int", 0, "y", True),
+)
 
 RECOGNITION_ACTION_FIELDS = (
     FieldSpec(
@@ -310,6 +316,7 @@ REGISTRY.register(
         can_fail=True,
         fields=RECOGNITION_SEARCH_FIELDS
         + RECOGNITION_TARGET_FIELDS
+        + RECOGNITION_OFFSET_FIELDS
         + RECOGNITION_ACTION_FIELDS
         + (
             FieldSpec("wait_after", "点击后等待（秒）", "float", 0.0),
@@ -436,6 +443,8 @@ def step_summary(step: Step) -> str:
             parts.append(f"点击 ({params.get('click_x', 540)}, {params.get('click_y', 1000)})")
         else:
             parts.append("点击识别位置")
+        if params.get("offset_x") or params.get("offset_y"):
+            parts.append(f"偏移 ({params.get('offset_x', 0)}, {params.get('offset_y', 0)})")
         if params.get("return_to"):
             parts.append("返回连接")
         if params.get("tap_between"):

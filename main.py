@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 from threading import Timer
 import webbrowser
 
@@ -9,7 +11,16 @@ import uvicorn
 from web_server import app
 
 
+def _ensure_stdio() -> None:
+    """Windowed (console=False) 打包下 stdout/stderr 为 None，uvicorn 日志会崩溃，这里兜底。"""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
 def main() -> None:
+    _ensure_stdio()
     parser = argparse.ArgumentParser(description="ADB 图像自动化控制台 Web 服务")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8001)

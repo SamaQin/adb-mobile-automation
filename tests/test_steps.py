@@ -100,6 +100,71 @@ class FindAndTapTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual([(12, 13)], device.taps)
 
+    def test_offset_applies_to_template_center(self) -> None:
+        random = np.random.default_rng(73)
+        screen = random.integers(0, 255, (80, 100, 3), dtype=np.uint8)
+        template = screen[20:40, 30:55].copy()
+
+        with TemporaryDirectory() as directory:
+            template_dir = Path(directory)
+            save_image(template_dir / "target.png", template)
+            device = FakeDevice(screen)
+            context = RuntimeContext(
+                device=device,
+                template_dir=template_dir,
+                stop_event=Event(),
+                log=lambda _message: None,
+            )
+            step = Step(
+                name="find",
+                kind="find_and_tap",
+                params={
+                    "templates": [{"file": "target.png", "threshold": 0.99}],
+                    "attempts": 1,
+                    "offset_x": 5,
+                    "offset_y": -4,
+                },
+            )
+
+            result = run_find_and_tap(step, context)
+
+        self.assertTrue(result.success)
+        self.assertEqual([(47, 26)], device.taps)
+
+    def test_offset_combines_with_custom_click(self) -> None:
+        random = np.random.default_rng(74)
+        screen = random.integers(0, 255, (80, 100, 3), dtype=np.uint8)
+        template = screen[20:40, 30:55].copy()
+
+        with TemporaryDirectory() as directory:
+            template_dir = Path(directory)
+            save_image(template_dir / "target.png", template)
+            device = FakeDevice(screen)
+            context = RuntimeContext(
+                device=device,
+                template_dir=template_dir,
+                stop_event=Event(),
+                log=lambda _message: None,
+            )
+            step = Step(
+                name="find",
+                kind="find_and_tap",
+                params={
+                    "templates": [{"file": "target.png", "threshold": 0.99}],
+                    "attempts": 1,
+                    "custom_click": True,
+                    "click_x": 60,
+                    "click_y": 36,
+                    "offset_x": 3,
+                    "offset_y": 2,
+                },
+            )
+
+            result = run_find_and_tap(step, context)
+
+        self.assertTrue(result.success)
+        self.assertEqual([(63, 38)], device.taps)
+
     def test_multiple_targets_tap_top_row_from_left_to_right(self) -> None:
         random = np.random.default_rng(23)
         screen = random.integers(0, 255, (100, 120, 3), dtype=np.uint8)

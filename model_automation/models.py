@@ -18,8 +18,8 @@ def canonical_step_kind(kind: str, params: dict[str, Any]) -> str:
         params.setdefault("custom_click", False)
         params.setdefault("click_x", 540)
         params.setdefault("click_y", 1000)
-        params.pop("offset_x", None)
-        params.pop("offset_y", None)
+        params.setdefault("offset_x", 0)
+        params.setdefault("offset_y", 0)
     return kind
 
 

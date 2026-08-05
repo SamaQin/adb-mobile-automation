@@ -79,6 +79,8 @@ class PresetArchiveTests(unittest.TestCase):
                     "duration": 300,
                     "click_x": 25,
                     "click_y": 75,
+                    "offset_x": -5,
+                    "offset_y": 8,
                     "wait_after": 0.0,
                 },
                 depends_on=[first.id],
@@ -100,6 +102,7 @@ class PresetArchiveTests(unittest.TestCase):
             params = imported.steps[1].params
             self.assertEqual((20, 360, 180, 40), (params["x1"], params["y1"], params["x2"], params["y2"]))
             self.assertEqual((50, 150), (params["click_x"], params["click_y"]))
+            self.assertEqual((-10, 16), (params["offset_x"], params["offset_y"]))
             self.assertEqual(300, params["duration"])
             self.assertEqual(0.9, params["templates"][0]["threshold"])
             self.assertEqual(

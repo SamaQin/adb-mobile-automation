@@ -148,8 +148,7 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertEqual("multi", migrated.params["tap_mode"])
         self.assertEqual((540, 1000), (migrated.params["click_x"], migrated.params["click_y"]))
         self.assertFalse(migrated.params["custom_click"])
-        self.assertNotIn("offset_x", migrated.params)
-        self.assertNotIn("offset_y", migrated.params)
+        self.assertEqual((5, -4), (migrated.params["offset_x"], migrated.params["offset_y"]))
         self.assertNotIn("find_and_multi_tap", {item["key"] for item in definitions})
         action_field = next(
             field

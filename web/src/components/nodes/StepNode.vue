@@ -40,7 +40,10 @@ function summary(step) {
     const target = step.params?.custom_click
       ? `(${step.params?.click_x ?? 540}, ${step.params?.click_y ?? 1000})`
       : '识别位置'
-    return `${action} ${target} · ${templates.value.length ? templates.value.map((item) => item.file).join(' · ') : '未选择模板'}`
+    const offset = (step.params?.offset_x || step.params?.offset_y)
+      ? ` 偏移 (${step.params?.offset_x ?? 0}, ${step.params?.offset_y ?? 0})`
+      : ''
+    return `${action} ${target}${offset} · ${templates.value.length ? templates.value.map((item) => item.file).join(' · ') : '未选择模板'}`
   }
   if (step?.kind === 'run_preset') return configStore.presets.find((item) => item.id === params.preset_id)?.name || params.preset_name || '未选择预设'
   if (step?.kind === 'end_loop') return '进入下一轮'
