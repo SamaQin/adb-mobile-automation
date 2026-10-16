@@ -1,7 +1,6 @@
 <script setup>
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Background } from '@vue-flow/background'
-import { Controls } from '@vue-flow/controls'
 import { MiniMap } from '@vue-flow/minimap'
 import { VueFlow, useVueFlow } from '@vue-flow/core'
 import {
@@ -11,8 +10,12 @@ import {
   Copy,
   Eye,
   LocateFixed,
+  Lock,
+  Minus,
   Pencil,
+  Plus,
   Power,
+  Unlock,
   RotateCcw,
   Rows3,
   Trash2,
@@ -42,8 +45,9 @@ const nodes = ref([])
 const edges = ref([])
 const contextMenu = ref(null)
 const nodeTypes = { start: markRaw(StartNode), step: markRaw(StepNode), branch: markRaw(BranchNode), group: markRaw(GroupNode) }
-const { fitView, screenToFlowCoordinate, setCenter, getViewport, updateNodeInternals } = useVueFlow()
+const { fitView, zoomIn, zoomOut, screenToFlowCoordinate, setCenter, getViewport, updateNodeInternals } = useVueFlow()
 const locked = computed(() => uiStore.readOnly || runStore.running || configStore.saving)
+const interactionsEnabled = ref(true)
 let rebuildVersion = 0
 
 async function rebuild() {
@@ -444,7 +448,7 @@ defineExpose({ nodes, edges, autoLayout, resetLayout, reorderByLayout, exportJso
       :max-zoom="2.5"
       :nodes-draggable="!locked"
       :nodes-connectable="!locked"
-      :elements-selectable="true"
+      :elements-selectable="!locked && interactionsEnabled"
       :delete-key-code="null"
       :multi-selection-key-code="'Shift'"
       :is-valid-connection="isValidConnection"
@@ -462,10 +466,13 @@ defineExpose({ nodes, edges, autoLayout, resetLayout, reorderByLayout, exportJso
     >
       <Background pattern-color="#475569" :gap="20" :size="1" />
       <MiniMap :pannable="true" :zoomable="true" node-color="#38bdf8" mask-color="rgba(4, 9, 16, 0.72)" />
-      <Controls position="bottom-left" />
     </VueFlow>
     <div class="canvas-toolbar panel" aria-label="画布工具">
+      <button title="放大" @click="zoomIn()"><Plus :size="15" /></button>
+      <button title="缩小" @click="zoomOut()"><Minus :size="15" /></button>
       <button title="适应视图" @click="fitView({ padding: 0.18, duration: 300 })"><LocateFixed :size="15" /></button>
+      <button :title="interactionsEnabled ? '锁定画布交互' : '解锁画布交互'" :disabled="locked" @click="interactionsEnabled = !interactionsEnabled"><component :is="interactionsEnabled ? Unlock : Lock" :size="15" /></button>
+      <span />
       <button title="自动布局" :disabled="locked" @click="autoLayout"><AlignVerticalJustifyCenter :size="15" /></button>
       <button title="按布局重排执行顺序" :disabled="locked" @click="reorderByLayout"><Rows3 :size="15" /></button>
       <button title="将所选步骤加入新泳道" :disabled="locked" @click="createGroup"><Columns3 :size="15" /></button>
