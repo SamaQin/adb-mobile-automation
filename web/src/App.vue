@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AlertTriangle, RefreshCw, WifiOff, X } from 'lucide-vue-next'
 import FlowCanvas from './components/FlowCanvas.vue'
 import LogPanel from './components/editors/LogPanel.vue'
@@ -21,6 +21,63 @@ const runStore = useRunStore()
 const uiStore = useUiStore()
 const flowCanvas = ref(null)
 const ready = computed(() => Boolean(configStore.config && configStore.selectedPreset))
+let faviconTimer = null
+let faviconLink = null
+let originalFavicon = ''
+let showFailureFavicon = false
+
+function failedNodesPresent(nodeStates) {
+  return Object.values(nodeStates).some((node) => node?.state === 'failed')
+}
+
+function setFailureFavicon(enabled) {
+  if (!faviconLink) {
+    faviconLink = document.querySelector('link[rel~="icon"]')
+    if (!faviconLink) {
+      faviconLink = document.createElement('link')
+      faviconLink.rel = 'icon'
+      faviconLink.href = createDefaultFavicon()
+      document.head.appendChild(faviconLink)
+    }
+    originalFavicon = faviconLink.href
+  }
+
+  if (enabled) {
+    showFailureFavicon = !showFailureFavicon
+    faviconLink.href = showFailureFavicon ? createFailureFavicon() : originalFavicon
+  } else {
+    faviconLink.href = originalFavicon
+    showFailureFavicon = false
+  }
+}
+
+function createDefaultFavicon() {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0ea5e9"/><path d="M18 18h28v6H24v9h20v6H24v9h22v6H18z" fill="#fff"/></svg>'
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`
+}
+
+function createFailureFavicon() {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#ef4444"/><path d="M32 12 56 52H8z" fill="#fff"/><path d="M32 25v13m0 6v1" stroke="#ef4444" stroke-width="5" stroke-linecap="round"/></svg>'
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`
+}
+
+function stopFaviconAlert() {
+  if (faviconTimer) clearInterval(faviconTimer)
+  faviconTimer = null
+  setFailureFavicon(false)
+}
+
+watch(() => failedNodesPresent(runStore.nodeStates), (hasFailure) => {
+  if (hasFailure) {
+    if (!faviconTimer) faviconTimer = setInterval(() => setFailureFavicon(true), 600)
+  } else {
+    stopFaviconAlert()
+  }
+}, { immediate: true })
+
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible' && failedNodesPresent(runStore.nodeStates)) stopFaviconAlert()
+}
 
 async function initialize() {
   await configStore.load()
@@ -58,10 +115,13 @@ onMounted(() => {
   initialize().catch(() => {})
   window.addEventListener('keydown', globalKeys)
   window.addEventListener('beforeunload', beforeUnload)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', globalKeys)
   window.removeEventListener('beforeunload', beforeUnload)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  stopFaviconAlert()
   runStore.socket?.close()
 })
 </script>
