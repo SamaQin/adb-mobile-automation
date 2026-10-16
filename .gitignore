@@ -1,22 +1,42 @@
-# folder
-.idea
-.venv
-build
-dist
-templates_file
-docs
-web/node_modules
-web/artifacts
-web/dist
-web/test-results
-web/playwright-report
+# Python environments, caches, and coverage output
+.venv/
 __pycache__/
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
+# IDE and editor state
+.idea/
+.vscode/
 
-# file
-NUL
+# User data and local-only files
 config.json
 config.json.tmp
-*.py[cod]
+config.json.*.tmp
+templates_file/
+NUL
 *.log
+*.bak
+*.uploading
+.env
+.env.*
+!.env.example
+
+# Build and package output
+build/
+dist/
+web/dist/
+web/artifacts/
+
+# Frontend dependencies and test output
+web/node_modules/
+web/test-results/
+web/playwright-report/
+web/coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

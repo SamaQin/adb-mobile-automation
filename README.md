@@ -1,102 +1,143 @@
-# ADB 图像自动化控制台
+# ADB Automation Workbench
 
-通过 ADB 和 OpenCV 截取设备画面，并按预设顺序执行模板识别、点击、滑动和等待步骤。
+A Windows desktop automation tool for Android devices. It uses ADB to capture device screens and send touch input, while OpenCV matches screen regions against image templates. Build workflows visually in a browser, then run them as ordered, repeatable presets.
 
-## 启动
+[简体中文文档](README.zh-CN.md)
 
-Windows 下在项目目录运行：
+## Features
 
-```bat
-.venv\Scripts\python.exe main.py
+- Visual workflow canvas with draggable nodes, connections, grouping, and automatic layout.
+- Image recognition with configurable similarity thresholds, retries, multiple templates, and optional continuation after a failed step.
+- Coordinate taps, repeated taps, swipes, waits, nested preset execution, and loop control.
+- Screenshot-based coordinate and swipe selection. Selections are converted back to the device's original pixel coordinates.
+- Live run status, per-step results, logs, and device connection checks.
+- User configuration and image templates stored beside the application for easy backup.
+
+## Requirements
+
+For a source checkout on Windows:
+
+- Windows 10 or later.
+- Python 3.12.
+- Node.js and npm (only needed to build or develop the web UI).
+- An Android device with USB debugging enabled and authorized for this computer.
+
+The project includes `adb.exe` and its Windows support DLLs at the repository root. The application uses this bundled ADB first and falls back to `adb` on `PATH` if the bundled executable is unavailable. The target computer may also need the device manufacturer's USB driver.
+
+## Install and run from source
+
+Run commands from the repository root in Windows PowerShell or Command Prompt.
+
+1. Create a Python environment and install the backend dependencies:
+
+   ```powershell
+   py -3.12 -m venv .venv
+   .venv\Scripts\python.exe -m pip install -r requirements.txt
+   ```
+
+2. Build the web interface (required for the normal single-server launch):
+
+   ```powershell
+   cd web
+   npm install
+   npm run build
+   cd ..
+   ```
+
+3. Connect and authorize the Android device, then start the application:
+
+   ```powershell
+   .venv\Scripts\python.exe main.py
+   ```
+
+The server listens on `http://127.0.0.1:8001` and opens the browser automatically. To choose another port or keep the browser closed:
+
+```powershell
+.venv\Scripts\python.exe main.py --port 8080 --no-browser
 ```
 
-服务默认监听 `http://127.0.0.1:8001` 并自动打开浏览器（可用 `--port 8000` 或 `--no-browser` 覆盖）。开发前端时，可在另一个终端运行 `cd web && npm run dev`，Vite 会把 `/api` 与 `/ws` 代理到 Python 服务。
+Then open `http://127.0.0.1:8080` yourself. The service binds to localhost by default and is intended for local use.
 
-如果需要重建环境：
+### Frontend development mode
 
-```bat
-py -3.12 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+Start the backend from the repository root in one terminal:
+
+```powershell
+.venv\Scripts\python.exe main.py --port 8000 --no-browser
+```
+
+In a second terminal, start Vite:
+
+```powershell
 cd web
-npm install
-npm run build
+npm run dev
 ```
 
-手机需启用 USB 调试并授权当前电脑。控制台会优先使用项目内的 `adb.exe`，否则使用 `PATH` 中的 `adb`。
+Open the URL printed by Vite. Its development proxy forwards API and WebSocket requests to the backend at `http://127.0.0.1:8000`.
 
-## 使用
+Stop either process with `Ctrl+C`.
 
-1. 连接设备并在顶部栏点击“检查设备”。
-2. 从左侧步骤库拖入或双击添加节点，通过画布连线设置前置依赖。
-3. 在右侧属性面板编辑识别点击、识别连击、坐标点击、滑动或等待步骤。
-4. 编辑坐标点击步骤时，可打开设备截图查看实时坐标并单击选取位置。
-5. 编辑滑动步骤时，可在设备截图上按住鼠标拖动，自动填写起点、终点和方向。
-6. 识别点击和识别连击支持设置点击位置的 `X/Y` 偏移；连击可设置次数和间隔。
-7. 对识别步骤，可将“执行失败时”设为“跳到下一步”。
-8. 可为步骤关联顺序在前的步骤：前置步骤本轮未执行时，本步骤自动跳过；每轮循环都会重置状态重新判断。
-9. 设置预设循环次数；`0` 表示无限循环，直到步骤失败或手动停止。
-10. 使用上移/下移或“按布局重排”调整执行顺序，选择预设后点击“运行”。
+## Use the workbench
 
-配置继续写入 `config.json`，截图模板写入 `templates_file/`，以兼容已有用户数据。旧版仅包含 `support_pos` 和 `start_pos` 的配置会在首次启动时自动迁移并保留原流程。
+1. Connect the device over USB, enable **USB debugging**, accept the authorization prompt on the device, and click **Check device** in the top toolbar.
+2. Select or create a preset. Drag a step from the left palette onto the canvas, or double-click it to add it.
+3. Select a node to edit its properties in the right panel. Available operations include image recognition and tap, multi-tap, coordinate tap, swipe, wait, preset execution, and loop control.
+4. For image recognition, add template images and set a similarity threshold. Configure retries and intervals when needed. A step can stop the preset on failure or continue to the next step.
+5. Use the screenshot picker to capture a template region, select tap coordinates, or draw a swipe path. The app stores coordinates in the device's original resolution even when the preview is scaled.
+6. Connect steps on the canvas to express prerequisites. A step is skipped in a cycle if a prerequisite was disabled, skipped, or failed with continuation enabled.
+7. Set the preset loop count: `1` runs once; `0` repeats until a failure or a manual stop. Use **Run** to start and the stop control to interrupt execution.
+8. Follow per-node states and the log panel to diagnose a run. Use the canvas fit, zoom, lock, and layout controls to navigate the workflow.
 
-截图交互窗口会根据手机截图与电脑屏幕尺寸自动等比缩小；模板区域、点击位置和滑动轨迹都会换算回手机原始分辨率坐标。
+## Data and backups
 
-## 打包发布
+The application creates `config.json` and `templates_file/` in the project root on first use. In a PyInstaller build, they are created beside the executable. Back up both before replacing or upgrading the application. Do not place a packaged copy in a protected directory such as `C:\Program Files`, because the application needs write access to its data directory.
 
-项目使用 PyInstaller 打包为免安装的单目录程序（`ADB-Automation.spec`），前端静态资源、`adb.exe` 及 ADB 运行库都会一并打入。
+The configuration loader migrates supported legacy configurations when they are opened. Keep a backup before manually editing configuration files.
 
-### 准备工作（仅首次）
+## Build a distributable Windows app
 
-```bat
-py -3.12 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe -m pip install pyinstaller
-cd web
-npm install
-```
+The PyInstaller spec creates a one-folder distribution that includes the Python runtime, web assets, ADB executable, and support DLLs. Build on Windows.
 
-### 打包步骤
+1. Install the source requirements and PyInstaller:
 
-```bat
-REM 1. 构建前端（产物输出到 web\dist）
-cd web
-npm run build
-cd ..
+   ```powershell
+   py -3.12 -m venv .venv
+   .venv\Scripts\python.exe -m pip install -r requirements.txt
+   .venv\Scripts\python.exe -m pip install pyinstaller
+   cd web
+   npm install
+   npm run build
+   cd ..
+   ```
 
-REM 2. 执行 PyInstaller 打包（按 ADB-Automation.spec）
-.venv\Scripts\pyinstaller.exe --noconfirm ADB-Automation.spec
-```
+2. Package the application:
 
-打包完成后，可执行文件在：
+   ```powershell
+   .venv\Scripts\pyinstaller.exe --noconfirm ADB-Automation.spec
+   ```
 
-```text
-dist\ADB-Automation\ADB-Automation.exe
-```
+The executable is `dist\ADB-Automation\ADB-Automation.exe`. Distribute the **entire** `dist\ADB-Automation\` directory; the executable cannot run by itself. The target computer does not need Python or Node.js installed. The Android USB driver may still be required.
 
-### 分发与运行
+To inspect startup logs for a packaged build, launch the executable from a terminal. Change the port or suppress automatic browser opening with `--port PORT` and `--no-browser`.
 
-- 把 `dist\ADB-Automation\` **整个文件夹**拷到目标机器即可运行，无需安装 Python 或 Node.js。该目录是一体的：`ADB-Automation.exe` 依赖同目录下的动态库、Python 运行时和 `web\dist` 静态资源，**不能只拷贝 exe 单独运行**。
-- 目标位置建议放在任意有读写权限的目录（例如 `D:\ADB-Automation` 或桌面上的专用文件夹）。不要放在 `C:\Program Files` 等受限目录，因为程序要在 exe 所在目录创建并读写用户数据。
-- 双击 `ADB-Automation.exe` 启动，服务默认监听 `http://127.0.0.1:8001` 并自动打开浏览器；需要改端口或不开浏览器时，在命令行运行：
-  ```bat
-  ADB-Automation.exe --port 8080 --no-browser
-  ```
-- 用户数据（`config.json`、`templates_file\`）会在 exe 所在目录首次启动时自动创建，重装/升级前备份这两个即可。
-- 每次修改前端代码后需要重新打包时，重复“打包步骤”中的两步即可；只改 Python 代码则只需第 2 步。
+## Troubleshooting
 
-### 常见问题
+- **The browser cannot connect:** Confirm the backend is running, use the port shown by the launch command, and check whether another process already occupies it.
+- **The device is not detected:** Enable USB debugging, accept the device authorization prompt, install the appropriate Windows USB driver, and verify that ADB can see the device.
+- **The page is missing or stale in a packaged build:** Run `npm run build` in `web/` before packaging again.
+- **A template is not recognized:** Confirm the template belongs to the same screen state and resolution, then adjust its similarity threshold and retry settings.
+- **The app cannot save its data:** Move it to a directory where the current user has write permission.
 
-- 打包后启动失败：多为 `web\dist` 不是最新，先执行 `npm run build` 再打包。
-- 双击启动后没有控制台窗口属正常现象（窗口模式打包，日志不会显示）；如需查看启动日志或排查问题，在命令行中运行 `ADB-Automation.exe` 即可看到输出。
-- 端口被占用：换 `--port` 启动。
-- 目标机器无 ADB 驱动：程序已内置 `adb.exe`，但需在系统里装好手机对应厂商的 USB 驱动，并开启 USB 调试授权。
+## Tests and checks
 
-## 验证
+Run from the repository root:
 
-```bat
+```powershell
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 .venv\Scripts\python.exe -m compileall -q main.py model_automation web_server tests
 cd web
 npm test
 npm run build
 ```
+
+Device input and screenshot selection require a connected, authorized Android device and are not covered by unit tests.
