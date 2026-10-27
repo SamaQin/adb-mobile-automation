@@ -1,8 +1,10 @@
 import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
 import TemplatePicker from './TemplatePicker.vue'
 
 describe('TemplatePicker', () => {
+  beforeEach(() => setActivePinia(createPinia()))
   it('previews threshold while sliding and commits it on change', async () => {
     const wrapper = mount(TemplatePicker, {
       props: { modelValue: [{ file: 'target.png', threshold: 0.8 }] },

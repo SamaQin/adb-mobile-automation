@@ -1,6 +1,5 @@
 import { defineStore } from 'pinia'
 import {
-  duplicatePreset as duplicatePresetApi,
   fetchConfig,
   fetchPresetReferences,
   fetchStepDefinitions,
@@ -10,20 +9,65 @@ import {
 import { normalizeDependencies, parseBranchNodeId } from '../flow/createFlow.js'
 import { cloneJson } from '../utils/clone.js'
 import { useHistoryStore } from './historyStore.js'
+import { useLayoutStore } from './layoutStore.js'
+
+const pendingSaves = new WeakMap()
 
 const clone = cloneJson
 const newId = () => (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`).replaceAll('-', '')
 
 function remapStep(step, idMap = new Map()) {
   const copy = clone(step)
-  const oldId = copy.id
-  copy.id = newId()
-  idMap.set(oldId, copy.id)
-  const branches = copy.params?.branches || {}
-  for (const branchSteps of Object.values(branches)) {
-    for (let i = 0; i < branchSteps.length; i += 1) branchSteps[i] = remapStep(branchSteps[i], idMap)
+  const remap = (item) => {
+    const oldId = item.id
+    item.id = newId()
+    idMap.set(oldId, item.id)
+    for (const children of Object.values(item.params?.branches || {})) children.forEach(remap)
   }
+  remap(copy)
   return copy
+}
+
+// Reuse unchanged draft fields so editing a name does not replace params,
+// branches, or dependencies observed by the canvas.
+function shareUnchanged(previous, next) {
+  if (previous === next) return previous
+  if (!previous || !next || typeof previous !== 'object' || typeof next !== 'object'
+    || Array.isArray(previous) !== Array.isArray(next)) return next
+  const keys = Object.keys(next)
+  let same = keys.length === Object.keys(previous).length
+  for (const key of keys) {
+    next[key] = shareUnchanged(previous[key], next[key])
+    if (!(key in previous) || previous[key] !== next[key]) same = false
+  }
+  return same ? previous : next
+}
+
+function dependencyStructureChanged(previous, next) {
+  if (previous === next) return false
+  if (previous.id !== next.id || previous.depends_on !== next.depends_on
+    || previous.params?.return_to !== next.params?.return_to) return true
+  const before = previous.params?.branches || {}
+  const after = next.params?.branches || {}
+  if (before === after) return false
+  const keys = Object.keys(after)
+  if (keys.length !== Object.keys(before).length) return true
+  return keys.some((key) => !before[key] || before[key].length !== after[key].length
+    || after[key].some((step, index) => dependencyStructureChanged(before[key][index], step)))
+}
+
+function selectedRoots(steps, selected, parent = null, branchIndex = null) {
+  const found = []
+  for (const step of steps || []) {
+    const nodeId = parent ? branchNodeIdSafe(parent.id, branchIndex, step.id) : step.id
+    if (selected.has(nodeId)) found.push({ step, list: steps, nodeId, parent, branchIndex })
+    else {
+      for (const [index, children] of Object.entries(step.params?.branches || {})) {
+        found.push(...selectedRoots(children, selected, step, index))
+      }
+    }
+  }
+  return found
 }
 
 function applyRemappedDependencies(step, idMap) {
@@ -35,7 +79,7 @@ function applyRemappedDependencies(step, idMap) {
 }
 
 export const useConfigStore = defineStore('config', {
-  state: () => ({ config: null, definitions: [], loading: false, saving: false, dirty: false, error: '' }),
+  state: () => ({ config: null, definitions: [], loading: false, saving: false, dirty: false, error: '', revision: 0, savedConfig: '' }),
   getters: {
     presets: (state) => state.config?.presets || [],
     selectedPreset(state) {
@@ -45,22 +89,27 @@ export const useConfigStore = defineStore('config', {
   },
   actions: {
     snapshot() {
-      return clone(this.config)
+      return { config: clone(this.config), layouts: clone(useLayoutStore().layouts) }
     },
     record(label) {
-      if (this.config) useHistoryStore().push(this.snapshot(), label)
+      if (this.config) useHistoryStore().push({ config: this.config, layouts: useLayoutStore().layouts }, label)
     },
     changed() {
+      this.revision += 1
       this.dirty = true
     },
     async load() {
       this.loading = true
       this.error = ''
+      const revision = this.revision
       try {
         const [config, definitions] = await Promise.all([fetchConfig(), fetchStepDefinitions()])
+        if (this.revision !== revision) return
         this.config = config
         this.definitions = definitions
         this.dirty = false
+        this.savedConfig = JSON.stringify(config)
+        this.revision += 1
         useHistoryStore().clear()
       } catch (error) {
         this.error = error.message
@@ -69,21 +118,36 @@ export const useConfigStore = defineStore('config', {
         this.loading = false
       }
     },
-    async save() {
-      if (!this.config) return
+    save() {
+      if (!this.config) return Promise.resolve()
+      if (pendingSaves.has(this)) return pendingSaves.get(this)
+      if (this.saving) return Promise.reject(new Error('设置正在保存，请稍后重试'))
+      const payload = clone(this.config)
+      const revision = this.revision
+      const serialized = JSON.stringify(payload)
       this.saving = true
-      try {
-        const result = await saveConfig(this.config)
-        if (result?.presets) this.config = result
-        this.dirty = false
-        useHistoryStore().clear()
-      } finally {
+      const request = Promise.resolve().then(() => saveConfig(payload)).then((result) => {
+        this.savedConfig = JSON.stringify(result?.presets ? result : payload)
+        // A delayed response must never overwrite edits made after this request.
+        if (this.revision === revision && JSON.stringify(this.config) === serialized) {
+          if (result?.presets) this.config = result
+          this.dirty = false
+        } else {
+          this.dirty = JSON.stringify(this.config) !== this.savedConfig
+        }
+        return result
+      }).finally(() => {
+        pendingSaves.delete(this)
         this.saving = false
-      }
+      })
+      pendingSaves.set(this, request)
+      return request
     },
     replaceFromHistory(snapshot) {
-      this.config = clone(snapshot)
-      this.dirty = true
+      this.config = clone(snapshot.config ?? snapshot)
+      if (snapshot.layouts) useLayoutStore().restore(snapshot.layouts)
+      this.revision += 1
+      this.dirty = JSON.stringify(this.config) !== this.savedConfig
     },
     selectPreset(id) {
       if (!this.config?.presets.some((preset) => preset.id === id)) return
@@ -103,22 +167,7 @@ export const useConfigStore = defineStore('config', {
     },
     async duplicatePreset(presetId) {
       this.record('复制预设')
-      try {
-        const result = await duplicatePresetApi(presetId)
-        if (result?.presets) {
-          this.config = result
-          this.changed()
-          return this.selectedPreset
-        }
-        if (result?.id) {
-          this.config.presets.push(result)
-          this.config.selected_preset_id = result.id
-          this.changed()
-          return result
-        }
-      } catch (error) {
-        if (error.status !== 404 && error.status !== 405) throw error
-      }
+      // Duplicate the current draft, including unsaved edits, in one undoable operation.
       const source = this.presets.find((item) => item.id === presetId)
       if (!source) throw new Error('未找到预设')
       const idMap = new Map()
@@ -180,17 +229,30 @@ export const useConfigStore = defineStore('config', {
       this.changed()
     },
     async setAcceleration(value) {
+      if (this.saving || this.config.acceleration === value) return
       const previous = this.config.acceleration
       this.record('修改加速模式')
       this.config.acceleration = value
       this.changed()
+      const revision = this.revision
+      this.saving = true
       try {
         const result = await setAccelerationApi(value)
-        if (typeof result === 'string') this.config.acceleration = result
-        else if (result?.acceleration) this.config.acceleration = result.acceleration
+        const applied = typeof result === 'string' ? result : result?.acceleration || value
+        if (this.revision === revision) this.config.acceleration = applied
+        // This endpoint persists the setting independently of the draft config.
+        if (this.savedConfig) {
+          const baseline = JSON.parse(this.savedConfig)
+          baseline.acceleration = applied
+          this.savedConfig = JSON.stringify(baseline)
+          this.dirty = JSON.stringify(this.config) !== this.savedConfig
+        }
       } catch (error) {
-        this.config.acceleration = previous
+        if (this.revision === revision) this.config.acceleration = previous
+        this.dirty = JSON.stringify(this.config) !== this.savedConfig
         throw error
+      } finally {
+        this.saving = false
       }
     },
     createStep(kind) {
@@ -225,51 +287,71 @@ export const useConfigStore = defineStore('config', {
     mutateStep(nodeId, mutator, label = '编辑步骤') {
       const found = this.findStep(nodeId)
       if (!found.step) return
+      let draft = clone(found.step)
+      mutator(draft, found)
+      draft = shareUnchanged(found.step, draft)
+      if (draft === found.step) return
+      const normalize = dependencyStructureChanged(found.step, draft)
       this.record(label)
-      mutator(found.step, found)
-      if (found.list) normalizeDependencies(this.selectedPreset.steps)
+      for (const key of Object.keys(found.step)) {
+        if (!(key in draft)) delete found.step[key]
+      }
+      Object.assign(found.step, draft)
+      if (normalize) normalizeDependencies(this.selectedPreset.steps)
+      this.changed()
+    },
+    setStepsEnabled(nodeIds, enabled) {
+      const steps = nodeIds.map((id) => this.findStep(id).step).filter((step) => step && step.enabled !== enabled)
+      if (!steps.length) return
+      this.record(enabled ? '批量启用' : '批量停用')
+      for (const step of steps) step.enabled = enabled
       this.changed()
     },
     deleteSteps(nodeIds) {
-      const ids = new Set(nodeIds)
-      if (!ids.size) return
+      const roots = selectedRoots(this.selectedPreset?.steps, new Set(nodeIds))
+      if (!roots.length) return
       this.record('删除步骤')
-      this.selectedPreset.steps = this.selectedPreset.steps.filter((step) => !ids.has(step.id))
-      this.selectedPreset.steps.forEach((step) => removeBranchStepsRecursive(step, ids))
+      const byList = new Map()
+      for (const { step, list } of roots) {
+        if (!byList.has(list)) byList.set(list, new Set())
+        byList.get(list).add(step)
+      }
+      for (const [list, removed] of byList) {
+        for (let index = list.length - 1; index >= 0; index -= 1) {
+          if (removed.has(list[index])) list.splice(index, 1)
+        }
+      }
       normalizeDependencies(this.selectedPreset.steps)
       this.changed()
     },
     duplicateStep(nodeId) {
-      const found = this.findStep(nodeId)
-      if (!found.step || !found.list) return null
-      this.record('复制步骤')
-      const idMap = new Map()
-      const copy = remapStep(found.step, idMap)
-      applyRemappedDependencies(copy, idMap)
-      copy.name = `${copy.name} 副本`
-      const index = found.list.indexOf(found.step)
-      found.list.splice(index + 1, 0, copy)
-      normalizeDependencies(this.selectedPreset.steps)
-      this.changed()
-      return found.branch ? `branch:${found.branch.parentStepId}:${found.branch.index}:${copy.id}` : copy.id
+      return this.duplicateSteps([nodeId])[0] || null
     },
     duplicateSteps(nodeIds) {
-      const selected = new Set(nodeIds)
-      const main = this.selectedPreset.steps.filter((step) => selected.has(step.id))
-      if (!main.length) {
-        const copies = nodeIds.map((id) => this.duplicateStep(id)).filter(Boolean)
-        return copies
-      }
-      this.record('复制步骤')
+      // Traverse in execution order and stop below selected parents. Every
+      // selected subtree is copied once, regardless of selection order.
+      const roots = selectedRoots(this.selectedPreset?.steps, new Set(nodeIds))
+      if (!roots.length) return []
       const idMap = new Map()
-      const copies = main.map((step) => remapStep(step, idMap))
-      copies.forEach((step) => applyRemappedDependencies(step, idMap))
-      copies.forEach((step) => { step.name = `${step.name} 副本` })
-      const insertAt = Math.max(...main.map((step) => this.selectedPreset.steps.indexOf(step))) + 1
-      this.selectedPreset.steps.splice(insertAt, 0, ...copies)
+      const copies = roots.map(({ step }) => remapStep(step, idMap))
+      copies.forEach((copy) => {
+        applyRemappedDependencies(copy, idMap)
+        copy.name = `${copy.name} 副本`
+      })
+      this.record('复制步骤')
+      const byList = new Map()
+      roots.forEach(({ step, list }, index) => {
+        if (!byList.has(list)) byList.set(list, { insertAt: 0, copies: [] })
+        const group = byList.get(list)
+        group.insertAt = Math.max(group.insertAt, list.indexOf(step) + 1)
+        group.copies.push(copies[index])
+      })
+      for (const [list, group] of byList) list.splice(group.insertAt, 0, ...group.copies)
       normalizeDependencies(this.selectedPreset.steps)
       this.changed()
-      return copies.map((step) => step.id)
+      return roots.map(({ parent, branchIndex }, index) => parent
+        ? branchNodeIdSafe(parent.id, branchIndex, copies[index].id)
+        : copies[index].id)
     },
     moveStep(nodeId, delta) {
       const found = this.findStep(nodeId)
@@ -285,7 +367,8 @@ export const useConfigStore = defineStore('config', {
     reorderSteps(orderedIds) {
       const map = new Map(this.selectedPreset.steps.map((step) => [step.id, step]))
       const next = orderedIds.map((id) => map.get(id)).filter(Boolean)
-      if (next.length !== this.selectedPreset.steps.length) return
+      if (next.length !== this.selectedPreset.steps.length || new Set(next).size !== next.length
+        || next.every((step, index) => step === this.selectedPreset.steps[index])) return
       this.record('按布局重排')
       this.selectedPreset.steps = next
       normalizeDependencies(this.selectedPreset.steps)
@@ -456,11 +539,4 @@ function findStepRecursive(steps, id) {
     }
   }
   return null
-}
-
-function removeBranchStepsRecursive(parent, ids) {
-  for (const [index, branchSteps] of Object.entries(parent.params?.branches || {})) {
-    parent.params.branches[index] = branchSteps.filter((step) => !ids.has(branchNodeIdSafe(parent.id, index, step.id)))
-    parent.params.branches[index].forEach((step) => removeBranchStepsRecursive(step, ids))
-  }
 }

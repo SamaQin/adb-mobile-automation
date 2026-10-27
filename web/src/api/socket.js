@@ -18,17 +18,21 @@ export class EventSocket {
     this.onState?.('connecting')
 
     socket.addEventListener('open', () => {
+      if (this.closed || this.socket !== socket) return
       const wasReconnect = this.attempt > 0
       this.attempt = 0
       this.onState?.('connected')
       if (wasReconnect) this.onReconnect?.()
     })
     socket.addEventListener('message', (event) => {
+      if (this.closed || this.socket !== socket) return
+      let payload
       try {
-        this.onEvent?.(JSON.parse(event.data))
+        payload = JSON.parse(event.data)
       } catch {
-        this.onEvent?.({ type: 'log', data: { text: String(event.data) } })
+        payload = { type: 'log', data: { text: String(event.data) } }
       }
+      this.onEvent?.(payload)
     })
     socket.addEventListener('close', () => {
       if (this.socket === socket) this.scheduleReconnect()

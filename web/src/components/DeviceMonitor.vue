@@ -18,6 +18,7 @@ const {
   loading: streamLoading,
   live: streamLive,
   error: streamError,
+  codec: streamCodec,
   start: startStream,
   stop: stopStream,
   retry: retryStream,
@@ -250,7 +251,7 @@ onBeforeUnmount(() => {
 
     <footer class="device-monitor-footer">
       <span><i class="monitor-status-dot" :class="{ live: isLive, error: Boolean(streamError) }" />{{ statusLabel }}</span>
-      <span>{{ streamLive ? 'H.264 · 实时' : '低延迟投屏' }}</span>
+      <span>{{ streamLive ? `${streamCodec === 'h264' ? 'H.264' : 'JPEG'} · 实时` : '低延迟投屏' }}</span>
     </footer>
 
     <button

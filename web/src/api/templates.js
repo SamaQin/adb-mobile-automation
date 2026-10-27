@@ -5,8 +5,9 @@ export async function fetchTemplates() {
   return unwrap(payload, ['templates', 'items']) || []
 }
 
-export function templateThumbnailUrl(name) {
-  return `/api/templates/${encodeURIComponent(name)}/thumbnail`
+export function templateThumbnailUrl(name, revision) {
+  const query = revision ? `?revision=${encodeURIComponent(revision)}` : ''
+  return `/api/templates/${encodeURIComponent(name)}/thumbnail${query}`
 }
 
 export async function uploadTemplate(file) {

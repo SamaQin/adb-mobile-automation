@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { autoLayoutForPreset } from '../composables/useAutoLayout.js'
 import { cloneJson } from '../utils/clone.js'
+import { useConfigStore } from './configStore.js'
 
 const GROUPS_KEY = '__groups'
 const GROUP_OF_KEY = '__groupOf'
@@ -55,6 +56,19 @@ function syncGroupBounds(layout) {
   }
 }
 
+function persistLayout(store, presetId, serialized) {
+  // A gesture can report its final positions more than once. Avoid repeated
+  // browser writes, including repeated restores of the same history state.
+  try {
+    const key = storageKey(presetId)
+    if (localStorage.getItem(key) === serialized) return
+    localStorage.setItem(key, serialized)
+  } catch (error) {
+    console.warn('无法持久化画布布局', error)
+  }
+  store.revision += 1
+}
+
 export const useLayoutStore = defineStore('layout', {
   state: () => ({ layouts: {}, revision: 0 }),
   actions: {
@@ -66,18 +80,31 @@ export const useLayoutStore = defineStore('layout', {
       return this.load(presetId)
     },
     persist(presetId) {
-      this.layouts[presetId].__layoutVersion = LAYOUT_VERSION
-      localStorage.setItem(storageKey(presetId), JSON.stringify(this.layouts[presetId] || {}))
-      this.revision += 1
+      this.load(presetId).__layoutVersion = LAYOUT_VERSION
+      persistLayout(this, presetId, JSON.stringify(this.layouts[presetId]))
+    },
+    restore(layouts) {
+      // Missing keys mean the preset had not been loaded when history was recorded.
+      // Preserve those unrelated browser layouts instead of deleting user data.
+      for (const [id, layout] of Object.entries(layouts)) this.setLayout(id, layout)
     },
     setPosition(presetId, nodeId, position) {
       const layout = this.load(presetId)
-      layout[nodeId] = { x: Number(position.x), y: Number(position.y) }
+      const x = Number(position.x)
+      const y = Number(position.y)
+      if (!Number.isFinite(x) || !Number.isFinite(y) || (layout[nodeId]?.x === x && layout[nodeId]?.y === y)) return
+      layout[nodeId] = { x, y }
       this.persist(presetId)
     },
-    setLayout(presetId, layout) {
-      this.layouts[presetId] = cloneJson(layout)
-      this.persist(presetId)
+    setLayout(presetId, layout, record = false) {
+      const current = this.load(presetId)
+      const next = { __layoutVersion: LAYOUT_VERSION, ...layout }
+      next.__layoutVersion = LAYOUT_VERSION
+      const serialized = JSON.stringify(next)
+      if (JSON.stringify({ __layoutVersion: LAYOUT_VERSION, ...current }) === serialized) return
+      if (record) useConfigStore().record('修改布局')
+      this.layouts[presetId] = JSON.parse(serialized)
+      persistLayout(this, presetId, serialized)
     },
     groups(presetId) {
       const layout = this.load(presetId)
@@ -86,6 +113,7 @@ export const useLayoutStore = defineStore('layout', {
     },
     createGroup(presetId, name, nodeIds = [], flowNodes = []) {
       const layout = this.load(presetId)
+      useConfigStore().record('创建泳道')
       layout[GROUPS_KEY] ||= {}
       layout[GROUP_OF_KEY] ||= {}
       for (const node of flowNodes) {
@@ -103,6 +131,8 @@ export const useLayoutStore = defineStore('layout', {
     },
     removeGroup(presetId, groupId) {
       const layout = this.load(presetId)
+      if (!layout[GROUPS_KEY]?.[groupId]) return
+      useConfigStore().record('删除泳道')
       delete layout[GROUPS_KEY]?.[groupId]
       for (const [nodeId, owner] of Object.entries(layout[GROUP_OF_KEY] || {})) {
         if (owner === groupId) delete layout[GROUP_OF_KEY][nodeId]
@@ -111,24 +141,35 @@ export const useLayoutStore = defineStore('layout', {
     },
     renameGroup(presetId, groupId, name) {
       const group = this.load(presetId)[GROUPS_KEY]?.[groupId]
-      if (!group || !name.trim()) return
+      if (!group || !name.trim() || group.name === name.trim()) return
+      useConfigStore().record('重命名泳道')
       group.name = name.trim()
       this.persist(presetId)
     },
     assignNodeToGroup(presetId, nodeId, position) {
+      this.setPositions(presetId, [{ id: nodeId, position }])
+    },
+    setPositions(presetId, nodes) {
       const layout = this.load(presetId)
+      const updates = nodes.filter(({ id, position }) => id && position && !id.startsWith('group:')
+        && Number.isFinite(Number(position.x)) && Number.isFinite(Number(position.y)))
+      if (!updates.some(({ id, position }) => layout[id]?.x !== Number(position.x) || layout[id]?.y !== Number(position.y))) return
+      useConfigStore().record('移动节点')
       layout[GROUPS_KEY] ||= {}
       layout[GROUP_OF_KEY] ||= {}
-      layout[nodeId] = { x: Number(position.x), y: Number(position.y) }
-      const center = { x: position.x + NODE_WIDTH / 2, y: position.y + NODE_HEIGHT / 2 }
-      const owner = Object.values(layout[GROUPS_KEY]).find((group) => (
-        center.x >= group.x
-        && center.x <= group.x + group.width
-        && center.y >= group.y
-        && center.y <= group.y + group.height
-      ))
-      if (owner) layout[GROUP_OF_KEY][nodeId] = owner.id
-      else delete layout[GROUP_OF_KEY][nodeId]
+      // Use the same original group bounds for every node in a multi-selection.
+      const groups = Object.values(layout[GROUPS_KEY])
+      for (const { id, position } of updates) {
+        const x = Number(position.x)
+        const y = Number(position.y)
+        layout[id] = { x, y }
+        if (id === 'start') continue
+        const center = { x: x + NODE_WIDTH / 2, y: y + NODE_HEIGHT / 2 }
+        const owner = groups.find((group) => center.x >= group.x && center.x <= group.x + group.width
+          && center.y >= group.y && center.y <= group.y + group.height)
+        if (owner) layout[GROUP_OF_KEY][id] = owner.id
+        else delete layout[GROUP_OF_KEY][id]
+      }
       syncGroupBounds(layout)
       this.persist(presetId)
     },
@@ -138,6 +179,8 @@ export const useLayoutStore = defineStore('layout', {
       if (!group) return
       const deltaX = Number(position.x) - group.x
       const deltaY = Number(position.y) - group.y
+      if (!deltaX && !deltaY) return
+      useConfigStore().record('移动泳道')
       group.x = Number(position.x)
       group.y = Number(position.y)
       for (const [nodeId, owner] of Object.entries(layout[GROUP_OF_KEY] || {})) {
@@ -149,7 +192,7 @@ export const useLayoutStore = defineStore('layout', {
       }
       this.persist(presetId)
     },
-    autoLayout(preset) {
+    autoLayout(preset, record = true) {
       const current = this.load(preset.id)
       const layout = {
         ...autoLayoutForPreset(preset),
@@ -157,12 +200,22 @@ export const useLayoutStore = defineStore('layout', {
         [GROUP_OF_KEY]: cloneJson(current[GROUP_OF_KEY] || {}),
       }
       syncGroupBounds(layout)
-      this.setLayout(preset.id, layout)
+      this.setLayout(preset.id, layout, record)
       return layout
     },
-    reset(presetId) {
-      delete this.layouts[presetId]
-      localStorage.removeItem(storageKey(presetId))
+    reset(presetId, auto = false) {
+      if (auto) {
+        const preset = useConfigStore().presets.find((item) => item.id === presetId)
+        if (preset) this.setLayout(presetId, {
+          ...autoLayoutForPreset(preset), [GROUPS_KEY]: {}, [GROUP_OF_KEY]: {},
+        }, true)
+        return
+      }
+      const layout = this.load(presetId)
+      if (Object.keys(layout).every((key) => key === '__layoutVersion')) return
+      useConfigStore().record('重置布局')
+      this.layouts[presetId] = { __layoutVersion: LAYOUT_VERSION }
+      this.persist(presetId)
     },
   },
 })

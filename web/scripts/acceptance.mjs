@@ -61,7 +61,7 @@ try {
         logs: box('.log-panel'),
         topbarOverflow: document.querySelector('.topbar')?.scrollWidth > document.querySelector('.topbar')?.clientWidth,
         nodeCount: document.querySelectorAll('.step-node').length,
-        controlButtons: [...document.querySelectorAll('.vue-flow__controls-button')].map((button) => {
+        controlButtons: [...document.querySelectorAll('.canvas-toolbar > button:nth-child(-n+4)')].map((button) => {
           const rect = button.getBoundingClientRect()
           return { top: rect.top, height: rect.height }
         }),
@@ -122,11 +122,11 @@ try {
     }
 
     const canvasWidth = layout.canvas.width
-    await page.getByTitle('收起节点库').click()
+    await page.getByTitle('收起步骤库').click()
     const collapsedPaletteWidth = await page.locator('.palette').evaluate((element) => element.getBoundingClientRect().width)
     const canvasAfterPaletteCollapse = await page.locator('.flow-canvas').evaluate((element) => element.getBoundingClientRect().width)
     if (collapsedPaletteWidth !== 42 || canvasAfterPaletteCollapse <= canvasWidth) throw new Error('节点库折叠未释放画布空间')
-    await page.getByTitle('展开节点库').click()
+    await page.getByTitle('展开步骤库').click()
     await page.getByTitle('收起检查器').click()
     const collapsedPropertiesWidth = await page.locator('.properties').evaluate((element) => element.getBoundingClientRect().width)
     if (collapsedPropertiesWidth !== 42) throw new Error('检查器折叠宽度不正确')
@@ -152,8 +152,7 @@ try {
     }))
     if (recognitionInspector.choices.join(',') !== '点击,连击'
       || !recognitionInspector.text.includes('自定义点击')
-      || recognitionInspector.text.includes('点击偏移 X')
-      || recognitionInspector.coordinateGroups.length !== 2
+      || recognitionInspector.coordinateGroups.length !== 0
       || recognitionInspector.customClickChecked) {
       throw new Error(`识别属性或坐标拾取分组不正确: ${JSON.stringify(recognitionInspector)}`)
     }
@@ -164,7 +163,7 @@ try {
       const buttonRect = group.querySelector('.coordinate-group-picker')?.getBoundingClientRect()
       return { rows: group.querySelectorAll('.field').length, height: rect.height, buttonHeight: buttonRect?.height }
     }))
-    if (groupsWithCustomClick.length !== 3
+    if (groupsWithCustomClick.length !== 1
       || groupsWithCustomClick.some((group) => group.rows < 2 || Math.abs(group.height - group.buttonHeight) > 1)) {
       throw new Error(`开启自定义点击后坐标拾取分组不正确: ${JSON.stringify(groupsWithCustomClick)}`)
     }

@@ -2,6 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AlertTriangle, RefreshCw, WifiOff, X } from 'lucide-vue-next'
 import DeviceMonitor from './components/DeviceMonitor.vue'
+import AppDialog from './components/AppDialog.vue'
+import WorkspaceHelp from './components/WorkspaceHelp.vue'
+import WorkspaceStatus from './components/WorkspaceStatus.vue'
 import FlowCanvas from './components/FlowCanvas.vue'
 import LogPanel from './components/editors/LogPanel.vue'
 import PresetToolbar from './components/editors/PresetToolbar.vue'
@@ -90,19 +93,33 @@ async function initialize() {
 
 function globalKeys(event) {
   const target = event.target
-  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName) || target?.isContentEditable) return
   const ctrl = event.ctrlKey || event.metaKey
+  if (ctrl && event.key.toLowerCase() === 's') {
+    event.preventDefault()
+    if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || runStore.running || uiStore.readOnly || configStore.saving) return
+    target?.blur?.()
+    configStore.save().then(() => uiStore.notify('配置已保存', 'success')).catch((error) => uiStore.notify(error.message, 'error'))
+    return
+  }
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName) || target?.isContentEditable) return
+  if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen) return
+  if (event.key === '?' || event.key === 'F1') {
+    event.preventDefault()
+    uiStore.helpOpen = true
+    return
+  }
+  if (ctrl && ['z', 'y', 's'].includes(event.key.toLowerCase()) && (runStore.running || uiStore.readOnly || configStore.saving)) {
+    event.preventDefault()
+    return
+  }
   if (ctrl && event.key.toLowerCase() === 'z') {
     event.preventDefault()
     const snapshot = event.shiftKey ? historyStore.redo(configStore.snapshot()) : historyStore.undo(configStore.snapshot())
-    if (snapshot) configStore.replaceFromHistory(snapshot)
+    if (snapshot) { configStore.replaceFromHistory(snapshot); uiStore.clearSelection() }
   } else if (ctrl && event.key.toLowerCase() === 'y') {
     event.preventDefault()
     const snapshot = historyStore.redo(configStore.snapshot())
-    if (snapshot) configStore.replaceFromHistory(snapshot)
-  } else if (ctrl && event.key.toLowerCase() === 's') {
-    event.preventDefault()
-    if (!runStore.running && !uiStore.readOnly) configStore.save().catch((error) => uiStore.notify(error.message, 'error'))
+    if (snapshot) { configStore.replaceFromHistory(snapshot); uiStore.clearSelection() }
   }
 }
 
@@ -133,6 +150,7 @@ onBeforeUnmount(() => {
     <div v-else-if="!ready" class="boot-screen error"><WifiOff :size="30" /><strong>无法加载配置</strong><span>{{ configStore.error || '后端服务未就绪' }}</span><button class="primary" @click="initialize"><RefreshCw :size="15" />重试</button></div>
     <template v-else>
       <PresetToolbar @auto-layout="flowCanvas?.autoLayout()" />
+      <WorkspaceStatus @focus-node="flowCanvas?.focusNode($event)" />
       <div class="workbench-grid" :class="{ 'logs-collapsed': uiStore.logCollapsed, 'palette-collapsed': uiStore.paletteCollapsed, 'properties-collapsed': uiStore.propertiesCollapsed }">
         <NodePalette @add="flowCanvas?.addStep($event)" />
         <FlowCanvas ref="flowCanvas" />
@@ -145,6 +163,8 @@ onBeforeUnmount(() => {
     <TemplateManager v-if="uiStore.templateDrawerOpen" @close="uiStore.templateDrawerOpen = false" />
     <ScreenshotEditor v-if="uiStore.screenshotRequest" :request="uiStore.screenshotRequest" @close="uiStore.closeScreenshot($event)" />
 
-    <div v-if="uiStore.toast" class="toast" :class="uiStore.toast.tone" role="status"><AlertTriangle v-if="uiStore.toast.tone === 'error'" :size="16" /><span>{{ uiStore.toast.message }}</span><button title="关闭通知" @click="uiStore.toast = null"><X :size="14" /></button></div>
+    <WorkspaceHelp v-if="uiStore.helpOpen" />
+    <AppDialog />
+    <div v-if="uiStore.toast" class="toast" :class="uiStore.toast.tone" role="status"><AlertTriangle v-if="uiStore.toast.tone === 'error'" :size="16" /><span>{{ uiStore.toast.message }}</span><button v-if="uiStore.toast.action" class="toast-action" @click="const action = uiStore.toast.action; uiStore.toast = null; action.run()">{{ uiStore.toast.action.label }}</button><button title="关闭通知" @click="uiStore.toast = null"><X :size="14" /></button></div>
   </div>
 </template>

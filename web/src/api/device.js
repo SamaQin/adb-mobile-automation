@@ -19,9 +19,12 @@ export async function fetchScreenshot(maxWidth, format = 'png') {
   })
 }
 
-export function deviceStreamUrl(token = '') {
-  const query = token ? `?stream=${encodeURIComponent(token)}` : ''
-  return `/api/device/stream${query}`
+export function deviceStreamUrl(token = '', codec = 'jpeg') {
+  const params = new URLSearchParams()
+  if (token) params.set('stream', token)
+  if (codec === 'h264') params.set('codec', 'h264')
+  const query = params.toString()
+  return `/api/device/stream${query ? `?${query}` : ''}`
 }
 
 export async function fetchStreamStatus() {

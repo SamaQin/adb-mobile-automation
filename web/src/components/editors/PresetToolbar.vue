@@ -25,6 +25,7 @@ import { useDeviceStore } from '../../stores/deviceStore.js'
 import { useHistoryStore } from '../../stores/historyStore.js'
 import { useRunStore } from '../../stores/runStore.js'
 import { useUiStore } from '../../stores/uiStore.js'
+import { useTemplateStore } from '../../stores/templateStore.js'
 
 const emit = defineEmits(['auto-layout', 'layout-reorder', 'reset-layout', 'canvas-export', 'canvas-import'])
 const configStore = useConfigStore()
@@ -33,7 +34,8 @@ const historyStore = useHistoryStore()
 const runStore = useRunStore()
 const uiStore = useUiStore()
 const archiveInput = ref(null)
-const locked = computed(() => uiStore.readOnly || runStore.running || configStore.saving)
+const preparingRun = ref(false)
+const locked = computed(() => uiStore.readOnly || runStore.running || configStore.saving || preparingRun.value)
 
 function hasEnabledStep(steps) {
   for (const step of steps || []) {
@@ -54,13 +56,13 @@ async function switchPreset(event) {
   await safe(() => configStore.save())
 }
 
-function newPreset() {
-  const name = window.prompt('新预设名称')
+async function newPreset() {
+  const name = await uiStore.promptText({ title: '新建预设', message: '预设用于保存一套可以重复运行的流程。', placeholder: '例如：每日任务', confirmLabel: '创建预设' })
   if (name != null) safe(async () => { configStore.addPreset(name); await configStore.save() })
 }
 
-function renamePreset() {
-  const name = window.prompt('预设名称', configStore.selectedPreset.name)
+async function renamePreset() {
+  const name = await uiStore.promptText({ title: '重命名预设', initialValue: configStore.selectedPreset.name, confirmLabel: '保存名称' })
   if (name != null) safe(() => configStore.renamePreset(configStore.selectedPreset.id, name))
 }
 
@@ -69,17 +71,26 @@ async function deletePreset() {
   const referenceText = references.length
     ? `\n\n以下步骤正在引用它：\n${references.map((item) => `${item.preset_name || item.preset} / ${item.step_name || item.step}`).join('\n')}`
     : ''
-  if (window.confirm(`删除预设“${configStore.selectedPreset.name}”？${referenceText}`)) configStore.deletePreset(configStore.selectedPreset.id)
+  const id = configStore.selectedPreset.id
+  if (await uiStore.confirmAction({ title: '删除预设？', message: `将删除“${configStore.selectedPreset.name}”及其中的步骤。可在删除后撤销。${referenceText}`, confirmLabel: '删除预设', danger: true })) {
+    if (locked.value) return
+    configStore.deletePreset(id)
+    const revision = configStore.revision
+    uiStore.notify('预设已删除', 'info', { label: '撤销删除', run: () => {
+      if (configStore.revision === revision) undo()
+      else uiStore.notify('后续已有编辑，请使用撤销按钮按顺序恢复。')
+    } })
+  }
 }
 
 function undo() {
   const snapshot = historyStore.undo(configStore.snapshot())
-  if (snapshot) configStore.replaceFromHistory(snapshot)
+  if (snapshot) { configStore.replaceFromHistory(snapshot); uiStore.clearSelection() }
 }
 
 function redo() {
   const snapshot = historyStore.redo(configStore.snapshot())
-  if (snapshot) configStore.replaceFromHistory(snapshot)
+  if (snapshot) { configStore.replaceFromHistory(snapshot); uiStore.clearSelection() }
 }
 
 async function save(title = '配置已保存') {
@@ -91,12 +102,22 @@ async function save(title = '配置已保存') {
 
 async function run() {
   if (runStore.running) return safe(() => runStore.stop())
-  if (configStore.dirty) await save('未保存的修改已自动保存')
-  const connected = await deviceStore.check()
-  if (!connected) throw new Error(deviceStore.error || '未连接 ADB 设备')
-  if (configStore.selectedPreset.loop_count === 0 && !hasEnabledStep(configStore.selectedPreset.steps)) throw new Error('无限循环预设至少需要一个启用步骤')
-  uiStore.clearSelection()
-  await runStore.start(configStore.selectedPreset.id)
+  if (preparingRun.value || configStore.saving) return
+  preparingRun.value = true
+  try {
+    const connected = await deviceStore.check()
+    if (!connected) throw new Error(deviceStore.error || '未连接 ADB 设备')
+    if (configStore.dirty) {
+      if (deviceStore.resolution) configStore.applyScreenResolution(deviceStore.resolution)
+      await configStore.save()
+      uiStore.notify('未保存的修改已自动保存', 'success')
+    }
+    if (configStore.selectedPreset.loop_count === 0 && !hasEnabledStep(configStore.selectedPreset.steps)) throw new Error('无限循环预设至少需要一个启用步骤')
+    uiStore.clearSelection()
+    await runStore.start(configStore.selectedPreset.id)
+  } finally {
+    preparingRun.value = false
+  }
 }
 
 async function exportArchive() {
@@ -110,6 +131,7 @@ async function importArchive(event) {
   event.target.value = ''
   if (!file) return
   const result = await importPresetArchive(file)
+  useTemplateStore().invalidate()
   if (result?.presets) configStore.config = result
   else await configStore.load()
   emit('auto-layout')
@@ -141,7 +163,7 @@ function changeAcceleration(event) {
     ><Smartphone :size="16" /></button>
 
     <div class="toolbar-separator" />
-    <label class="preset-select"><span>预设</span><select :value="configStore.selectedPreset?.id" :disabled="runStore.running || configStore.saving" @change="switchPreset"><option v-for="preset in configStore.presets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select></label>
+    <label class="preset-select"><span>预设</span><select :value="configStore.selectedPreset?.id" :disabled="runStore.running || configStore.saving || preparingRun" @change="switchPreset"><option v-for="preset in configStore.presets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select></label>
     <div class="button-cluster">
       <button title="新建预设" :disabled="locked" @click="newPreset"><FolderInput :size="15" /></button>
       <button title="复制预设" :disabled="locked" @click="safe(() => configStore.duplicatePreset(configStore.selectedPreset.id))"><Copy :size="15" /></button>
@@ -164,8 +186,8 @@ function changeAcceleration(event) {
       <button title="导出预设包" :disabled="runStore.running" @click="safe(exportArchive)"><Download :size="16" /></button>
       <button title="模板管理" @click="uiStore.templateDrawerOpen = true"><CheckCircle2 :size="16" /></button>
     </div>
-    <button class="save-button" title="保存配置" :disabled="locked || !configStore.dirty" @click="safe(save)"><Save :size="16" /><span>{{ configStore.saving ? '保存中' : '保存' }}</span><i v-if="configStore.dirty" /></button>
-    <button class="run-button" :class="{ stopping: runStore.running }" :title="runStore.running ? '停止运行' : '运行当前预设'" :disabled="configStore.saving" @click="safe(run)"><Square v-if="runStore.running" :size="15" fill="currentColor" /><Play v-else :size="16" fill="currentColor" /><span>{{ runStore.running ? '停止' : '运行' }}</span></button>
+    <button class="save-button" title="保存配置" :disabled="locked || !configStore.dirty" @click="safe(save)"><Save :size="16" /><span>{{ configStore.saving ? '保存中' : configStore.dirty ? '保存修改' : '已保存' }}</span><i v-if="configStore.dirty" /></button>
+    <button class="run-button" :class="{ stopping: runStore.running }" :title="runStore.running ? '停止运行' : '运行当前预设'" :disabled="configStore.saving || preparingRun || runStore.state === 'stopping'" @click="safe(run)"><Square v-if="runStore.running" :size="15" fill="currentColor" /><Play v-else :size="16" fill="currentColor" /><span>{{ runStore.state === 'stopping' ? '停止中…' : runStore.running ? '停止' : preparingRun ? '准备中…' : '运行' }}</span></button>
     <input ref="archiveInput" type="file" accept=".zip,.adb-preset.zip" hidden @change="safe(() => importArchive($event))" />
   </header>
 </template>

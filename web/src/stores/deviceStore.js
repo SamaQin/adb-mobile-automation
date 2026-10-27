@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { fetchDeviceState } from '../api/device.js'
 
+const pendingChecks = new WeakMap()
+
 export const useDeviceStore = defineStore('device', {
   state: () => ({ connected: false, resolution: null, state: 'unknown', checking: false, error: '' }),
   actions: {
@@ -11,19 +13,24 @@ export const useDeviceStore = defineStore('device', {
       this.state = state || (this.connected ? 'device' : 'offline')
       this.error = payload.error || payload.detail || ''
     },
-    async check() {
+    check() {
+      if (pendingChecks.has(this)) return pendingChecks.get(this)
       this.checking = true
-      try {
-        this.apply(await fetchDeviceState())
+      const request = Promise.resolve().then(fetchDeviceState).then((payload) => {
+        this.apply(payload)
         return this.connected
-      } catch (error) {
+      }).catch((error) => {
         this.connected = false
+        this.resolution = null
         this.state = 'error'
         this.error = error.message
         throw error
-      } finally {
+      }).finally(() => {
+        pendingChecks.delete(this)
         this.checking = false
-      }
+      })
+      pendingChecks.set(this, request)
+      return request
     },
   },
 })

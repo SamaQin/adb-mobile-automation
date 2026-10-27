@@ -32,8 +32,8 @@ body,
 #app {
   width: 100%;
   height: 100%;
-  min-width: 1280px;
-  min-height: 800px;
+  min-width: 960px;
+  min-height: 600px;
   margin: 0;
   overflow: hidden;
 }
@@ -144,8 +144,8 @@ input[type="range"] {
   position: relative;
   width: 100%;
   height: 100%;
-  min-width: 1280px;
-  min-height: 800px;
+  min-width: 960px;
+  min-height: 600px;
   padding: 9px;
 }
 
@@ -164,7 +164,8 @@ input[type="range"] {
   align-items: center;
   gap: 7px;
   padding: 7px 8px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .device-control {
@@ -354,10 +355,10 @@ input[type="range"] {
   --palette-width: 220px;
   --properties-width: 328px;
   display: grid;
-  height: calc(100% - 64px);
+  height: calc(100% - 108px);
   margin-top: 8px;
-  grid-template-columns: var(--palette-width) minmax(700px, 1fr) var(--properties-width);
-  grid-template-rows: minmax(390px, 1fr) 190px;
+  grid-template-columns: var(--palette-width) minmax(0, 1fr) var(--properties-width);
+  grid-template-rows: minmax(0, 1fr) minmax(100px, 190px);
   gap: 8px;
 }
 
@@ -365,7 +366,7 @@ input[type="range"] {
 .workbench-grid.properties-collapsed { --properties-width: 42px; }
 
 .workbench-grid.logs-collapsed {
-  grid-template-rows: minmax(540px, 1fr) 42px;
+  grid-template-rows: minmax(0, 1fr) 42px;
 }
 
 .palette {
@@ -1306,6 +1307,8 @@ input[type="range"] {
   min-width: 27px;
   min-height: 27px;
   padding: 0 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .canvas-toolbar button small {
@@ -1549,6 +1552,10 @@ input[type="range"] {
   grid-template-columns: 1fr 1fr;
   gap: 7px;
 }
+
+.template-drawer.paginated .template-grid { max-height: calc(100% - 159px); }
+.template-pagination { display: flex; height: 48px; align-items: center; justify-content: center; gap: 12px; border-top: 1px solid var(--line); }
+.template-pagination span { color: var(--muted); font-size: 12px; }
 
 .template-item {
   display: grid;
@@ -2030,6 +2037,7 @@ body.monitor-resizing * {
 .toast.success { border-color: rgba(52, 211, 153, 0.48); }
 .toast > span { flex: 1; }
 .toast button { min-width: 25px; min-height: 25px; padding: 0; }
+.toast .toast-action { padding: 3px 9px; color: var(--cyan); white-space: nowrap; }
 
 .boot-screen {
   position: absolute;
@@ -2069,6 +2077,22 @@ body.monitor-resizing * {
   border-radius: 8px;
   background: rgba(148, 163, 184, 0.28);
   background-clip: padding-box;
+}
+
+@media (max-width: 1200px) {
+  .topbar { height: 94px; flex-wrap: wrap; align-content: center; overflow: visible; }
+  .topbar > * { flex-shrink: 0; }
+  .workbench-grid { height: calc(100% - 146px); }
+}
+
+@media (max-width: 1100px) {
+  .workbench-grid { --palette-width: 180px; --properties-width: 280px; }
+  .workbench-grid.palette-collapsed { --palette-width: 42px; }
+  .workbench-grid.properties-collapsed { --properties-width: 42px; }
+}
+
+@media (max-height: 760px) {
+  .workbench-grid:not(.logs-collapsed) { grid-template-rows: minmax(0, 1fr) 130px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
