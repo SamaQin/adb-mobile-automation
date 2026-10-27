@@ -10,6 +10,7 @@ from model_automation.operations import (
     normalize_dependencies,
     run_preset_references,
     template_references,
+    template_reference_index,
     update_template_reference_resolutions,
 )
 from model_automation.steps import step_definitions
@@ -28,6 +29,18 @@ def recognition(name: str, branches: dict[str, list[dict]] | None = None) -> Ste
 
 
 class RecursiveOperationTests(unittest.TestCase):
+    def test_template_index_deduplicates_steps_and_includes_nested_references(self):
+        nested = recognition("nested")
+        root = recognition("root", {"0": [nested.to_dict()]})
+        root.params["templates"] += [{"file": "TARGET.PNG"}, {"file": "other.png"}]
+        owner = Preset(name="owner", steps=[root])
+        index = template_reference_index(iter([owner]))
+        self.assertEqual({"target.png", "other.png"}, set(index))
+        self.assertEqual(["root", "nested"], [item["step_name"] for item in index["target.png"]])
+        self.assertEqual(["root"], [item["step_name"] for item in index["other.png"]])
+        self.assertEqual(index["target.png"], template_references([owner], "TARGET.PNG"))
+        self.assertEqual([], template_references([owner], "absent.png"))
+
     def test_clone_preset_remaps_nested_ids_and_dependencies(self) -> None:
         nested_first = Step(name="nested first", kind="wait")
         nested_second = Step(
@@ -304,6 +317,63 @@ class ConfigValidationTests(unittest.TestCase):
             if field["key"] == "templates"
         )
         self.assertEqual([], fresh_field["default"])
+
+
+class FieldValidationTests(unittest.TestCase):
+    def test_roi_fields_have_safe_defaults_and_validate_before_persistence(self):
+        definitions = next(item for item in step_definitions() if item["key"] == "find_and_tap")
+        fields = {field["key"]: field for field in definitions["fields"]}
+        self.assertEqual(("bool", False), (fields["roi_enabled"]["kind"], fields["roi_enabled"]["default"]))
+        for key, axis in (("search_x", "x"), ("search_y", "y"),
+                          ("search_width", "x"), ("search_height", "y")):
+            self.assertEqual(("int", 0, axis),
+                             (fields[key]["kind"], fields[key]["default"], fields[key]["coordinate_axis"]))
+        base = {"templates": [{"file": "target.png"}]}
+        config = config_from_payload(self.payload("find_and_tap", base))
+        self.assertFalse(config.presets[0].steps[0].params["roi_enabled"])
+        invalid = [{"roi_enabled": True}, {"roi_enabled": "false"}, {"search_x": -1},
+                   {"search_width": True}, {"search_height": 1.2},
+                   {"roi_enabled": True, "search_width": 10, "search_height": 0}]
+        for params in invalid:
+            with self.subTest(params=params), self.assertRaises(ValidationError):
+                config_from_payload(self.payload("find_and_tap", {**base, **params}))
+
+
+    def payload(self, kind, params):
+        preset = Preset(name="preset", steps=[Step(name="step", kind=kind, params=params)])
+        return AppConfig(presets=[preset], selected_preset_id=preset.id).to_dict()
+
+    def test_invalid_field_types_ranges_and_nonfinite_numbers_are_rejected(self):
+        cases = [("tap", "x", True), ("tap", "y", 1.2), ("tap", "x", -1),
+                 ("swipe", "duration", -1), ("wait", "seconds", -0.1),
+                 ("wait", "seconds", "nan"), ("wait", "seconds", float("inf")),
+                 ("find_and_tap", "attempts", -1),
+                 ("find_and_tap", "attempts", 1.2),
+                 ("find_and_tap", "require_all", "false"),
+                 ("find_and_tap", "tap_mode", []),
+                 ("find_and_tap", "click_count", 0),
+                 ("find_and_tap", "click_interval", -0.1)]
+        for kind, key, value in cases:
+            with self.subTest(kind=kind, key=key, value=value):
+                params = {key: value}
+                if kind == "find_and_tap":
+                    params["templates"] = [{"file": "target.png"}]
+                with self.assertRaises(ValidationError):
+                    config_from_payload(self.payload(kind, params))
+
+    def test_defaults_numeric_strings_and_negative_offsets_remain_compatible(self):
+        config = config_from_payload(self.payload("tap", {"x": "12", "wait_after": "0.0"}))
+        self.assertEqual({"x": 12, "y": 1000, "wait_after": 0.0}, config.presets[0].steps[0].params)
+        params = {"templates": [{"file": "target.png"}], "offset_x": "-12", "attempts": "0"}
+        config = config_from_payload(self.payload("find_and_tap", params))
+        self.assertEqual(-12, config.presets[0].steps[0].params["offset_x"])
+        self.assertEqual(0, config.presets[0].steps[0].params["attempts"])
+
+    def test_template_threshold_types_and_nonfinite_values_are_rejected(self):
+        for value in (True, float("nan"), float("inf"), -0.1, 1.1):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                config_from_payload(self.payload("find_and_tap", {
+                    "templates": [{"file": "target.png", "threshold": value}]}))
 
 
 if __name__ == "__main__":

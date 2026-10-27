@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 from pathlib import Path
 import queue
@@ -26,6 +26,32 @@ PACKET_CONFIG_FLAG = 1 << 62
 PACKET_KEY_FRAME_FLAG = 1 << 61
 PACKET_PTS_MASK = (1 << 61) - 1
 JPEG_QUALITY = 82
+H264_QUEUE_SIZE = 32
+H264_CONTENT_TYPE = "application/x-adb-h264; version=1"
+
+
+def encode_session(width: int, height: int) -> bytes:
+    """Wire v1: a 12-byte session header, followed by config/keyframe packets."""
+    return (0x80000000).to_bytes(4, "big") + width.to_bytes(4, "big") + height.to_bytes(4, "big")
+
+
+def encode_packet(payload: bytes, pts: int = 0, *, config: bool = False, key_frame: bool = False) -> bytes:
+    flags = pts & PACKET_PTS_MASK
+    if config:
+        flags |= PACKET_CONFIG_FLAG
+    if key_frame:
+        flags |= PACKET_KEY_FRAME_FLAG
+    return flags.to_bytes(8, "big") + len(payload).to_bytes(4, "big") + payload
+
+
+def annexb_nals(data: bytes) -> list[bytes]:
+    import re
+    return [nal for nal in re.split(b"\x00\x00(?:\x00)?\x01", data) if nal]
+
+
+def has_parameter_sets(data: bytes) -> bool:
+    kinds = {nal[0] & 0x1F for nal in annexb_nals(data)}
+    return {7, 8}.issubset(kinds)
 
 
 class ScreencastError(RuntimeError):
@@ -157,6 +183,9 @@ class FrameSubscriber:
     identifier: int
     frames: queue.Queue[bytes | None]
     first_frame_at: float | None = None
+    codec: str = "jpeg"
+    waiting_keyframe: bool = True
+    created_at: float = field(default_factory=time.monotonic)
 
 
 class ScrcpyScreencast:
@@ -198,6 +227,11 @@ class ScrcpyScreencast:
         self._fps = 0.0
         self._frame_times: deque[float] = deque()
         self._latest_jpeg: bytes | None = None
+        self._h264_config: bytes | None = None
+        self._config_revision = 0
+        self._gop: list[tuple[bytes, int, bool]] = []
+        self._gop_bytes = 0
+        self._jpeg_decoder = None
         self._device_name = ""
         self._log_lines: deque[str] = deque(maxlen=40)
 
@@ -215,7 +249,9 @@ class ScrcpyScreencast:
                 "device": self._device_name,
             }
 
-    def subscribe(self) -> FrameSubscriber:
+    def subscribe(self, codec: str = "jpeg") -> FrameSubscriber:
+        if codec not in {"jpeg", "h264"}:
+            raise ScreencastError(f"不支持的投屏编码：{codec}")
         while True:
             self._cleanup_done.wait(timeout=5)
             with self._lock:
@@ -225,14 +261,28 @@ class ScrcpyScreencast:
                 if self._reader_thread is None or not self._reader_thread.is_alive():
                     self._start_locked()
                 subscriber = FrameSubscriber(
-                    self._next_subscriber, queue.Queue(maxsize=1)
+                    self._next_subscriber,
+                    queue.Queue(maxsize=H264_QUEUE_SIZE if codec == "h264" else 1),
+                    codec=codec,
                 )
                 self._next_subscriber += 1
                 self._subscribers[subscriber.identifier] = subscriber
-                if self._latest_jpeg is not None:
-                    self._offer(subscriber, self._latest_jpeg)
+                if codec == "h264" and self._gop and self._h264_config:
+                    self._offer(subscriber, self._bootstrap_locked())
+                    subscriber.waiting_keyframe = False
+                if codec == "jpeg":
+                    if self._latest_jpeg is None and self._gop and self._h264_config:
+                        self._jpeg_decoder = self._new_decoder()
+                        self._decode(self._jpeg_decoder, self._h264_config)
+                        for payload, _pts, _key in self._gop:
+                            self._decode(self._jpeg_decoder, payload)
+                    if self._latest_jpeg is not None:
+                        self._offer(subscriber, self._latest_jpeg)
                 self._schedule_subscriber_guard_locked()
                 return subscriber
+
+    def subscribe_h264(self) -> FrameSubscriber:
+        return self.subscribe(codec="h264")
 
     def touch(self, subscriber: FrameSubscriber) -> None:
         with self._lock:
@@ -243,6 +293,9 @@ class ScrcpyScreencast:
     def unsubscribe(self, subscriber: FrameSubscriber) -> None:
         with self._lock:
             self._subscribers.pop(subscriber.identifier, None)
+            if not any(sub.codec == "jpeg" for sub in self._subscribers.values()):
+                self._jpeg_decoder = None
+                self._latest_jpeg = None
             should_stop = (
                 not self._subscribers
                 and self._reader_thread is not None
@@ -256,9 +309,9 @@ class ScrcpyScreencast:
                 self._subscriber_guard.cancel()
                 self._subscriber_guard = None
 
-    def close(self) -> None:
+    def close(self, *, only_if_idle: bool = False) -> None:
         with self._lock:
-            if self._closing:
+            if self._closing or (only_if_idle and self._subscribers):
                 return
             self._closing = True
             self._cleanup_done.clear()
@@ -282,6 +335,10 @@ class ScrcpyScreencast:
             self._fps = 0.0
             self._frame_times.clear()
             self._latest_jpeg = None
+            self._h264_config = None
+            self._gop.clear()
+            self._gop_bytes = 0
+            self._jpeg_decoder = None
         try:
             for subscriber in subscribers:
                 self._offer(subscriber, None)
@@ -299,6 +356,10 @@ class ScrcpyScreencast:
         self._fps = 0.0
         self._frame_times.clear()
         self._latest_jpeg = None
+        self._h264_config = None
+        self._gop.clear()
+        self._gop_bytes = 0
+        self._jpeg_decoder = None
         self._log_lines.clear()
         self._stop_requested = False
         connection: socket.socket | None = None
@@ -367,6 +428,9 @@ class ScrcpyScreencast:
             "send_frame_meta=true",
             "send_stream_meta=true",
             "send_dummy_byte=true",
+            # Android MediaFormat options: bound GOP length and keep static displays
+            # producing frames, so an exhausted replay cache can recover.
+            "video_codec_options=i-frame-interval=1,repeat-previous-frame-after:long=100000",
             "cleanup=true",
         ]
         try:
@@ -439,28 +503,130 @@ class ScrcpyScreencast:
         self._height = meta.height
 
     def _reader_loop(self, connection: socket.socket) -> None:
-        decoder = self._new_decoder()
         length_size = 4
         try:
             while True:
                 header = parse_stream_header(_recv_exact(connection, 12))
                 if isinstance(header, StreamSession):
-                    self._width = header.width
-                    self._height = header.height
-                    decoder = self._new_decoder()
+                    self._set_session(header)
                     length_size = 4
                     continue
                 payload = _recv_exact(connection, header.size)
                 if header.config:
                     annexb, length_size = config_to_annexb(payload)
-                    self._decode(decoder, annexb)
+                    self._set_config(annexb)
                     continue
                 annexb = payload_to_annexb(payload, length_size)
-                self._decode(decoder, annexb)
+                # A keyframe can carry the parameter sets in-band as well.
+                parameter_sets = [nal for nal in annexb_nals(annexb) if nal[0] & 0x1F in {7, 8}]
+                if {nal[0] & 0x1F for nal in parameter_sets} == {7, 8}:
+                    self._set_config(b"".join(b"\x00\x00\x00\x01" + nal for nal in parameter_sets))
+                key_frame = header.key_frame or any(nal[0] & 0x1F == 5 for nal in annexb_nals(annexb))
+                with self._lock:
+                    self._publish_h264(annexb, header.pts, key_frame)
+                    wants_jpeg = any(sub.codec == "jpeg" for sub in self._subscribers.values())
+                    if not wants_jpeg:
+                        self._jpeg_decoder = None
+                        continue
+                    if self._jpeg_decoder is None:
+                        if not self._gop or self._h264_config is None:
+                            continue
+                        self._jpeg_decoder = self._new_decoder()
+                        self._decode(self._jpeg_decoder, self._h264_config)
+                        for cached, _pts, _key in self._gop:
+                            self._decode(self._jpeg_decoder, cached)
+                    else:
+                        self._decode(self._jpeg_decoder, annexb)
         except Exception as exc:
             if not self._stop_requested:
                 LOGGER.warning("scrcpy video stream stopped: %s", exc)
                 self._fail(exc)
+
+    def _set_session(self, session: StreamSession) -> None:
+        with self._lock:
+            self._width, self._height = session.width, session.height
+            self._latest_jpeg = None
+            self._h264_config = None
+            self._config_revision += 1
+            self._resync_h264_locked()
+
+    def _set_config(self, config: bytes) -> None:
+        if not has_parameter_sets(config):
+            raise ScreencastError("H.264 配置缺少 SPS/PPS")
+        with self._lock:
+            if config == self._h264_config:
+                return
+            self._h264_config = config
+            self._config_revision += 1
+            self._resync_h264_locked()
+
+    @staticmethod
+    def _empty_queue(subscriber: FrameSubscriber) -> None:
+        while True:
+            try:
+                subscriber.frames.get_nowait()
+            except queue.Empty:
+                return
+
+    def _resync_h264_locked(self) -> None:
+        self._gop.clear()
+        self._gop_bytes = 0
+        self._jpeg_decoder = None
+        self._latest_jpeg = None
+        for subscriber in self._subscribers.values():
+            if subscriber.codec == "h264":
+                self._empty_queue(subscriber)
+                subscriber.waiting_keyframe = True
+
+    def _bootstrap_locked(self) -> bytes:
+        return (encode_session(self._width, self._height)
+                + encode_packet(self._h264_config, config=True)
+                + b"".join(encode_packet(data, pts, key_frame=key) for data, pts, key in self._gop))
+
+    def _publish_h264(self, payload: bytes, pts: int, key_frame: bool) -> None:
+        with self._lock:
+            if key_frame:
+                self._gop.clear()
+                self._gop_bytes = 0
+            if key_frame or self._gop:
+                self._gop.append((payload, pts, key_frame))
+                self._gop_bytes += len(payload)
+                if len(self._gop) > 120 or self._gop_bytes > 8 * 1024 * 1024:
+                    self._gop.clear()
+                    self._gop_bytes = 0
+            self._record_frame_locked()
+            packet: bytes | None = None
+            bootstrap: bytes | None = None
+            for subscriber in self._subscribers.values():
+                if subscriber.codec != "h264":
+                    continue
+                if subscriber.frames.full():
+                    self._empty_queue(subscriber)
+                    subscriber.waiting_keyframe = True
+                if subscriber.waiting_keyframe:
+                    if not key_frame or self._h264_config is None:
+                        continue
+                    if bootstrap is None:
+                        if packet is None:
+                            packet = encode_packet(payload, pts, key_frame=key_frame)
+                        bootstrap = (encode_session(self._width, self._height)
+                                     + encode_packet(self._h264_config, config=True) + packet)
+                    frame = bootstrap
+                    subscriber.waiting_keyframe = False
+                else:
+                    if packet is None:
+                        packet = encode_packet(payload, pts, key_frame=key_frame)
+                    frame = packet
+                subscriber.frames.put_nowait(frame)
+
+    def _record_frame_locked(self) -> None:
+        now = time.monotonic()
+        self._state = "streaming"
+        self._message = ""
+        self._frame_times.append(now)
+        while self._frame_times and now - self._frame_times[0] > 1.0:
+            self._frame_times.popleft()
+        self._fps = float(len(self._frame_times))
 
     @staticmethod
     def _new_decoder() -> av.CodecContext:
@@ -469,29 +635,26 @@ class ScrcpyScreencast:
         return decoder
 
     def _decode(self, decoder: av.CodecContext, data: bytes) -> None:
-        for packet in decoder.parse(data):
-            for frame in decoder.decode(packet):
-                image = frame.to_ndarray(format="bgr24")
-                success, encoded = cv2.imencode(
-                    ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
-                )
-                if not success:
-                    raise ScreencastError("实时画面编码失败")
-                self._publish(encoded.tobytes(), image.shape[1], image.shape[0])
+        if not any(nal[0] & 0x1F in {1, 5} for nal in annexb_nals(data)):
+            decoder.extradata = data
+            return
+        # scrcpy packets already contain a complete access unit. Avoid parse(),
+        # which retains the final frame until a later packet on a static display.
+        for frame in decoder.decode(av.Packet(data)):
+            image = frame.to_ndarray(format="bgr24")
+            success, encoded = cv2.imencode(
+                ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+            )
+            if not success:
+                raise ScreencastError("实时画面编码失败")
+            self._publish(encoded.tobytes(), image.shape[1], image.shape[0])
 
     def _publish(self, jpeg: bytes, width: int, height: int) -> None:
-        now = time.monotonic()
         with self._lock:
             self._width = int(width)
             self._height = int(height)
             self._latest_jpeg = jpeg
-            self._state = "streaming"
-            self._message = ""
-            self._frame_times.append(now)
-            while self._frame_times and now - self._frame_times[0] > 1.0:
-                self._frame_times.popleft()
-            self._fps = float(len(self._frame_times))
-            subscribers = list(self._subscribers.values())
+            subscribers = [sub for sub in self._subscribers.values() if sub.codec == "jpeg"]
         for subscriber in subscribers:
             self._offer(subscriber, jpeg)
 
@@ -523,6 +686,8 @@ class ScrcpyScreencast:
 
     def _offer(self, subscriber: FrameSubscriber, frame: bytes | None) -> None:
         frames = subscriber.frames
+        if frame is None:
+            self._empty_queue(subscriber)
         try:
             frames.put_nowait(frame)
         except queue.Full:
@@ -545,7 +710,11 @@ class ScrcpyScreencast:
     def _schedule_subscriber_guard_locked(self) -> None:
         if self._subscriber_guard is not None:
             return
-        timer = Timer(6.0, self._drop_abandoned_subscribers)
+        pending = [sub for sub in self._subscribers.values() if sub.first_frame_at is None]
+        if not pending:
+            return
+        delay = max(0.05, min(sub.created_at + 15.0 for sub in pending) - time.monotonic())
+        timer = Timer(delay, self._drop_abandoned_subscribers)
         timer.daemon = True
         self._subscriber_guard = timer
         timer.start()
@@ -556,7 +725,7 @@ class ScrcpyScreencast:
             abandoned = [
                 subscriber
                 for subscriber in self._subscribers.values()
-                if subscriber.first_frame_at is None
+                if subscriber.first_frame_at is None and time.monotonic() - subscriber.created_at >= 15.0
             ]
             for subscriber in abandoned:
                 self._subscribers.pop(subscriber.identifier, None)
@@ -567,6 +736,7 @@ class ScrcpyScreencast:
             )
             if should_stop:
                 self._schedule_idle_stop_locked()
+            self._schedule_subscriber_guard_locked()
         for subscriber in abandoned:
             self._offer(subscriber, None)
         for subscriber in abandoned:
@@ -582,7 +752,7 @@ class ScrcpyScreencast:
             self._idle_timer = None
             if self._subscribers:
                 return
-        self.close()
+        self.close(only_if_idle=True)
 
     def _release(
         self,

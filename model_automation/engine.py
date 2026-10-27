@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from uuid import uuid4
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable
@@ -27,6 +28,20 @@ class RuntimeContext:
     presets: "dict[str, Preset] | None" = None
     preset_path: "tuple[tuple[str, str], ...]" = ()
     allow_external_jump: bool = False
+    event: Callable[[dict[str, Any]], None] | None = None
+    run_id: str | None = None
+    frame_id: str | None = None
+    parent_frame_id: str | None = None
+    step_id: str | None = None
+    cycle: int = 0
+
+    def emit(self, event_type: str, **data: Any) -> None:
+        if self.event is not None:
+            self.event({"type": event_type, "data": {
+                "run_id": self.run_id, "frame_id": self.frame_id,
+                "parent_frame_id": self.parent_frame_id, "cycle": self.cycle,
+                **data,
+            }})
 
     def wait(self, seconds: float) -> bool:
         return not self.stop_event.wait(max(0.0, seconds))
@@ -44,6 +59,25 @@ class StepEngine:
         self.registry = registry
 
     def run(self, preset: Preset, context: RuntimeContext) -> ExecutionReport:
+        # Each invocation owns a frame; replace preserves optional callbacks in children.
+        parent_step_id = context.step_id
+        context = replace(context, run_id=context.run_id or uuid4().hex,
+                          parent_frame_id=context.frame_id, frame_id=uuid4().hex,
+                          step_id=None, cycle=0)
+        context.emit("frame", action="enter", preset_id=preset.id,
+                     parent_step_id=parent_step_id, step_count=sum(step.enabled for step in preset.steps))
+        report = ExecutionReport("failed", "执行异常")
+        try:
+            report = self._run(preset, context)
+            return report
+        except Exception as exc:
+            report = ExecutionReport("failed", str(exc))
+            raise
+        finally:
+            context.emit("frame", action="exit", preset_id=preset.id,
+                         status=report.status, message=report.message, jump_to=report.jump_to)
+
+    def _run(self, preset: Preset, context: RuntimeContext) -> ExecutionReport:
         active_steps = [step for step in preset.steps if step.enabled]
         loop_count = max(0, preset.loop_count)
         loop_label = "无限" if loop_count == 0 else str(loop_count)
@@ -62,6 +96,13 @@ class StepEngine:
         cycle = 0
         while loop_count == 0 or cycle < loop_count:
             cycle += 1
+            context.cycle = cycle
+            context.step_id = None
+            context.emit("cycle", preset_id=preset.id, step_count=len(active_steps))
+            for disabled in preset.steps:
+                if not disabled.enabled:
+                    context.emit("step", preset_id=preset.id, step_id=disabled.id,
+                                 state="skipped", message="disabled")
             skipped: set[str] = {step.id for step in preset.steps if not step.enabled}
             known_ids = {step.id for step in preset.steps}
             for step in preset.steps:
@@ -81,15 +122,20 @@ class StepEngine:
                     return ExecutionReport("stopped", "执行已停止")
                 index = cursor + 1
                 step = active_steps[cursor]
+                context.step_id = step.id
 
                 missing = [dep for dep in step.depends_on if dep in skipped]
                 if missing:
                     skipped.add(step.id)
+                    context.emit("step", preset_id=preset.id, step_id=step.id,
+                                 step_index=index, state="skipped", message="dependency", depends_on=missing)
                     names = "、".join(id_to_name.get(dep, dep) for dep in missing)
                     context.log(f"  跳过：前置步骤未执行（{names}）")
                     cursor += 1
                     continue
 
+                context.emit("step", preset_id=preset.id, step_id=step.id,
+                             step_index=index, state="running")
                 definition = self.registry.get(step.kind)
                 if definition is None:
                     result = StepResult(False, f"未知步骤类型：{step.kind}")
@@ -103,6 +149,9 @@ class StepEngine:
                 if context.stop_event.is_set():
                     return ExecutionReport("stopped", "执行已停止")
                 if result.success:
+                    context.emit("step", preset_id=preset.id, step_id=step.id,
+                                 step_index=index, state="done", message=result.message)
+                    skipped.discard(step.id)
                     if result.message:
                         context.log(f"  完成：{result.message}")
                     if result.restart:
@@ -125,10 +174,14 @@ class StepEngine:
                             context.log(
                                 f"  返回步骤“{id_to_name.get(jump_target, jump_target)}”"
                             )
+                            context.emit("jump", preset_id=preset.id, step_id=step.id,
+                                         target_step_id=jump_target, external=False)
                             cursor = target_cursor
                             continue
                         if target_cursor is None:
                             if context.allow_external_jump:
+                                context.emit("jump", preset_id=preset.id, step_id=step.id,
+                                             target_step_id=jump_target, external=True)
                                 context.log(f"  请求跳转到外部步骤“{jump_target}”")
                                 context.log("预设执行完成")
                                 return ExecutionReport(
@@ -139,6 +192,9 @@ class StepEngine:
                     continue
 
                 reason = result.message or "步骤执行失败"
+                context.emit("step", preset_id=preset.id, step_id=step.id,
+                             step_index=index, state="skipped" if step.on_failure == "continue" else "failed",
+                             message=reason)
                 if step.on_failure == "continue":
                     skipped.add(step.id)
                     context.log(f"  跳过：{reason}")

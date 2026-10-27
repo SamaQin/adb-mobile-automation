@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
+from tempfile import NamedTemporaryFile
+from threading import Lock, RLock
 from typing import Any
 
 from .models import AppConfig, Preset, Step
@@ -80,6 +83,10 @@ def default_config() -> AppConfig:
 
 
 class ConfigStore:
+    # Stores pointing at the same path must also serialize initialization/migration.
+    _locks_guard = Lock()
+    _path_locks: dict[str, RLock] = {}
+
     def __init__(
         self,
         path: Path = CONFIG_PATH,
@@ -87,8 +94,15 @@ class ConfigStore:
     ) -> None:
         self.path = path
         self.template_dir = template_dir
+        key = os.path.normcase(str(path.resolve()))
+        with self._locks_guard:
+            self._lock = self._path_locks.setdefault(key, RLock())
 
     def load(self) -> AppConfig:
+        with self._lock:
+            return self._load()
+
+    def _load(self) -> AppConfig:
         self.template_dir.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             config = default_config()
@@ -119,16 +133,30 @@ class ConfigStore:
             raise ConfigError(f"配置内容无效: {exc}") from exc
 
     def save(self, config: AppConfig) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(
-            config.to_dict(), ensure_ascii=False, indent=2, sort_keys=False
-        )
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        try:
-            temporary.write_text(payload + "\n", encoding="utf-8")
-            temporary.replace(self.path)
-        except OSError as exc:
-            raise ConfigError(f"无法保存配置 {self.path.name}: {exc}") from exc
+        with self._lock:
+            temporary: Path | None = None
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                payload = json.dumps(
+                    config.to_dict(), ensure_ascii=False, indent=2, sort_keys=False
+                )
+                with NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=self.path.parent,
+                    prefix=self.path.name + ".", suffix=".tmp", delete=False,
+                ) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(payload + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                temporary.replace(self.path)
+            except OSError as exc:
+                raise ConfigError(f"无法保存配置 {self.path.name}: {exc}") from exc
+            finally:
+                if temporary is not None:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     @staticmethod
     def _migrate_legacy(data: dict[str, Any]) -> AppConfig:

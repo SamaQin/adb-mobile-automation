@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from functools import wraps
 from typing import Any
 
 from .engine import RuntimeContext, StepResult
 from .models import Preset, Step
 from .registry import FieldSpec, StepDefinition, StepRegistry
-from .vision import Match, find_template, load_image
+from .vision import Match, find_template, load_template, to_gray
+
+
+def load_image(path):
+    """Compatibility hook for existing step loaders/mocks; templates use the cache."""
+    return load_template(path, grayscale=True)
 
 
 REGISTRY = StepRegistry()
@@ -27,6 +33,23 @@ def _integer(params: dict[str, Any], key: str, default: int) -> int:
         raise ValueError(f"参数“{key}”必须是整数") from exc
 
 
+def _validated_runner(kind: str):
+    def decorate(runner):
+        @wraps(runner)
+        def validated(step: Step, context: RuntimeContext) -> StepResult:
+            try:
+                params = deepcopy(step.params)
+                if step.kind == "find_and_multi_tap":
+                    params.setdefault("tap_mode", "multi")
+                params = REGISTRY.get(kind).validate_params(params)
+            except ValueError as exc:
+                return StepResult(False, str(exc))
+            return runner(replace(step, params=params), context)
+        return validated
+    return decorate
+
+
+@_validated_runner("wait")
 def run_wait(step: Step, context: RuntimeContext) -> StepResult:
     seconds = max(0.0, _number(step.params, "seconds", 1.0))
     if not context.wait(seconds):
@@ -38,9 +61,12 @@ def run_end_loop(step: Step, context: RuntimeContext) -> StepResult:
     return StepResult(True, "结束本次循环", restart=True)
 
 
+@_validated_runner("tap")
 def run_tap(step: Step, context: RuntimeContext) -> StepResult:
     x = _integer(step.params, "x", 0)
     y = _integer(step.params, "y", 0)
+    if context.stop_event.is_set():
+        return StepResult(False, "执行已停止")
     context.device.tap(x, y)
     wait_after = max(0.0, _number(step.params, "wait_after", 0.0))
     if wait_after and not context.wait(wait_after):
@@ -48,6 +74,7 @@ def run_tap(step: Step, context: RuntimeContext) -> StepResult:
     return StepResult(True, f"点击 ({x}, {y})")
 
 
+@_validated_runner("swipe")
 def run_swipe(step: Step, context: RuntimeContext) -> StepResult:
     params = step.params
     x1 = _integer(params, "x1", 540)
@@ -55,6 +82,8 @@ def run_swipe(step: Step, context: RuntimeContext) -> StepResult:
     x2 = _integer(params, "x2", 540)
     y2 = _integer(params, "y2", 800)
     duration = max(0, _integer(params, "duration", 300))
+    if context.stop_event.is_set():
+        return StepResult(False, "执行已停止")
     context.device.swipe(x1, y1, x2, y2, duration)
     wait_after = max(0.0, _number(params, "wait_after", 0.0))
     if wait_after and not context.wait(wait_after):
@@ -76,9 +105,12 @@ def _load_templates(
         threshold = max(0.0, min(1.0, float(item.get("threshold", 0.8))))
         image = load_image(context.template_dir / filename)
         if image is None:
+            if step.params.get("require_all", False):
+                context.log(f"  全部匹配所需模板不可用：{filename}")
+                return []
             context.log(f"  模板不可用，已忽略：{filename}")
             continue
-        templates.append((original_index, filename, threshold, image))
+        templates.append((original_index, filename, threshold, to_gray(image)))
     return templates
 
 
@@ -132,11 +164,32 @@ def _run_recognition_taps(
         if context.stop_event.is_set():
             return StepResult(False, "执行已停止")
         screen = context.device.screenshot()
+        if context.stop_event.is_set():
+            return StepResult(False, "执行已停止")
+        search_screen = screen
+        origin_x = origin_y = 0
+        if step.params.get("roi_enabled", False):
+            origin_x = step.params["search_x"]
+            origin_y = step.params["search_y"]
+            width = step.params["search_width"]
+            height = step.params["search_height"]
+            screen_height, screen_width = screen.shape[:2]
+            # Device pixel bounds are [x, x + width) and [y, y + height).
+            # Reject invalid bounds instead of silently changing the search region.
+            if (origin_x + width > screen_width or origin_y + height > screen_height):
+                return StepResult(False, "搜索区域 ROI 超出屏幕范围（使用原始设备像素）")
+            search_screen = screen[origin_y:origin_y + height, origin_x:origin_x + width]
+        screen_gray = to_gray(search_screen)
         matches: list[tuple[int, str, Match]] = []
         for template_index, filename, threshold, image in templates:
-            match = find_template(screen, image, threshold)
+            if context.stop_event.is_set():
+                return StepResult(False, "执行已停止")
+            match = find_template(screen_gray, image, threshold)
             if match is not None:
+                match = Match(match.x + origin_x, match.y + origin_y, match.score)
                 matches.append((template_index, filename, match))
+        if context.stop_event.is_set():
+            return StepResult(False, "执行已停止")
         if matches and (not require_all or len(matches) >= len(templates)):
             _, filename, match = min(
                 matches,
@@ -182,6 +235,8 @@ def _run_recognition_taps(
                     f"点击坐标 ({target_x}, {target_y}) 超出屏幕范围",
                 )
             for click_index in range(click_count):
+                if context.stop_event.is_set():
+                    return StepResult(False, "执行已停止")
                 context.device.tap(target_x, target_y)
                 if click_index < click_count - 1 and not context.wait(click_interval):
                     return StepResult(False, "执行已停止")
@@ -202,11 +257,15 @@ def _run_recognition_taps(
         else:
             context.log(f"  第 {attempt} 次{reason}，继续重试")
         if bool(step.params.get("tap_between", False)):
+            if context.stop_event.is_set():
+                return StepResult(False, "执行已停止")
             context.device.tap(
                 _integer(step.params, "tap_between_x", 540),
                 _integer(step.params, "tap_between_y", 1000),
             )
         if bool(step.params.get("swipe_between", False)):
+            if context.stop_event.is_set():
+                return StepResult(False, "执行已停止")
             context.device.swipe(
                 _integer(step.params, "x1", 540),
                 _integer(step.params, "y1", 1800),
@@ -220,6 +279,7 @@ def _run_recognition_taps(
     return StepResult(False, f"尝试 {attempts} 次后仍未识别到目标")
 
 
+@_validated_runner("find_and_tap")
 def run_find_and_tap(step: Step, context: RuntimeContext) -> StepResult:
     mode = step.params.get("tap_mode")
     if mode is None and step.kind == "find_and_multi_tap":
@@ -239,6 +299,7 @@ def run_find_and_multi_tap(step: Step, context: RuntimeContext) -> StepResult:
     return run_find_and_tap(replace(step, kind="find_and_tap", params=params), context)
 
 
+@_validated_runner("run_preset")
 def run_run_preset(step: Step, context: RuntimeContext) -> StepResult:
     preset_id = str(step.params.get("preset_id", "")).strip()
     display_name = str(step.params.get("preset_name", "")).strip()
@@ -274,6 +335,11 @@ def run_run_preset(step: Step, context: RuntimeContext) -> StepResult:
 RECOGNITION_SEARCH_FIELDS = (
     FieldSpec("templates", "模板与阈值", "templates", []),
     FieldSpec("require_all", "匹配模式", "bool", False),
+    FieldSpec("roi_enabled", "限定搜索区域（原始设备像素）", "bool", False),
+    FieldSpec("search_x", "搜索左上角 X（含）", "int", 0, "x"),
+    FieldSpec("search_y", "搜索左上角 Y（含）", "int", 0, "y"),
+    FieldSpec("search_width", "搜索宽度（右边界不含）", "int", 0, "x"),
+    FieldSpec("search_height", "搜索高度（下边界不含）", "int", 0, "y"),
     FieldSpec("attempts", "识别次数（0 无限重试）", "int", 1),
     FieldSpec("interval", "重试间隔（秒）", "float", 1.0),
     FieldSpec("tap_between", "重试前点击", "bool", False),
@@ -304,7 +370,7 @@ RECOGNITION_ACTION_FIELDS = (
         "single",
         options=(("single", "点击"), ("multi", "连击")),
     ),
-    FieldSpec("click_count", "连击次数", "int", 2),
+    FieldSpec("click_count", "连击次数", "int", 2, minimum=1),
     FieldSpec("click_interval", "连击间隔（秒）", "float", 0.1),
 )
 

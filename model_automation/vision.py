@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 import cv2
@@ -43,7 +45,7 @@ def _probe_cuda_matcher() -> bool:
         template = np.zeros((8, 8), dtype=np.float32)
         image = np.zeros((16, 16), dtype=np.float32)
         result = matcher.match(
-            cv2.cuda_GpuMat(template), cv2.cuda_GpuMat(image)
+            cv2.cuda_GpuMat(image), cv2.cuda_GpuMat(template)
         )
         return result.download().shape == (9, 9)
     except _cuda_error():
@@ -104,6 +106,86 @@ def load_image(path: Path) -> np.ndarray | None:
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
+# Only templates are cached; screenshots loaded for editing stay independently mutable.
+TEMPLATE_CACHE_MAX_ENTRIES = 128
+TEMPLATE_CACHE_MAX_BYTES = 64 * 1024 * 1024
+_TEMPLATE_CACHE_LOCK = RLock()
+_TEMPLATE_CACHE: OrderedDict[Path, tuple[tuple[int, int], np.ndarray, np.ndarray]] = OrderedDict()
+_TEMPLATE_CACHE_BYTES = 0
+
+
+def clear_template_cache() -> None:
+    global _TEMPLATE_CACHE_BYTES
+    with _TEMPLATE_CACHE_LOCK:
+        _TEMPLATE_CACHE.clear()
+        _TEMPLATE_CACHE_BYTES = 0
+
+
+def to_gray(image: np.ndarray) -> np.ndarray:
+    """Accept existing grayscale arrays without converting them again."""
+    return image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+
+def _immutable_image(image: np.ndarray) -> np.ndarray:
+    # A bytes-backed array cannot be made writable again using setflags().
+    return np.frombuffer(image.tobytes(), dtype=image.dtype).reshape(image.shape)
+
+
+def load_template(path: Path, *, grayscale: bool = False) -> np.ndarray | None:
+    """Load a read-only template; LRU keys use resolved path, mtime_ns and size.
+
+    Decode and grayscale conversion are serialized so concurrent misses perform
+    the work once. Deleted, replaced or corrupt files never reuse old entries.
+    """
+    global _TEMPLATE_CACHE_BYTES
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, ValueError):
+        return None
+    with _TEMPLATE_CACHE_LOCK:
+        for _attempt in range(2):
+            try:
+                stat = resolved.stat()
+                signature = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                signature = None
+            cached = _TEMPLATE_CACHE.get(resolved)
+            if cached is not None:
+                if cached[0] == signature:
+                    _TEMPLATE_CACHE.move_to_end(resolved)
+                    return cached[2] if grayscale else cached[1]
+                _TEMPLATE_CACHE.pop(resolved)
+                _TEMPLATE_CACHE_BYTES -= cached[1].nbytes + cached[2].nbytes
+            if signature is None:
+                return None
+            try:
+                image = load_image(resolved)
+            except (cv2.error, ValueError):
+                return None
+            if image is None:
+                return None
+            try:
+                after = resolved.stat()
+            except OSError:
+                return None
+            if signature != (after.st_mtime_ns, after.st_size):
+                continue
+            gray = _immutable_image(to_gray(image))
+            color = _immutable_image(image)
+            size = color.nbytes + gray.nbytes
+            if size <= TEMPLATE_CACHE_MAX_BYTES and TEMPLATE_CACHE_MAX_ENTRIES > 0:
+                while _TEMPLATE_CACHE and (
+                    len(_TEMPLATE_CACHE) >= TEMPLATE_CACHE_MAX_ENTRIES
+                    or _TEMPLATE_CACHE_BYTES + size > TEMPLATE_CACHE_MAX_BYTES
+                ):
+                    _key, removed = _TEMPLATE_CACHE.popitem(last=False)
+                    _TEMPLATE_CACHE_BYTES -= removed[1].nbytes + removed[2].nbytes
+                _TEMPLATE_CACHE[resolved] = (signature, color, gray)
+                _TEMPLATE_CACHE_BYTES += size
+            return gray if grayscale else color
+    return None
+
+
 def save_image(path: Path, image: np.ndarray) -> None:
     extension = path.suffix or ".png"
     success, encoded = cv2.imencode(extension, image)
@@ -120,8 +202,8 @@ def _compute_match_result(
         try:
             if _GPU_BACKEND == "cuda" and _CUDA_MATCHER is not None:
                 result = _CUDA_MATCHER.match(
-                    cv2.cuda_GpuMat(template_gray.astype(np.float32)),
                     cv2.cuda_GpuMat(screen_gray.astype(np.float32)),
+                    cv2.cuda_GpuMat(template_gray.astype(np.float32)),
                 )
                 return result.download()
             if _GPU_BACKEND == "ocl":
@@ -179,11 +261,13 @@ def find_template(
     template: np.ndarray,
     threshold: float,
 ) -> Match | None:
-    screen_gray = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
-    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    """Find the spatially first match in BGR or preconverted grayscale images."""
+    screen_gray = to_gray(screen)
+    template_gray = to_gray(template)
     screen_height, screen_width = screen_gray.shape
     template_height, template_width = template_gray.shape
-    if template_height > screen_height or template_width > screen_width:
+    if (min(screen_height, screen_width, template_height, template_width) <= 0
+            or template_height > screen_height or template_width > screen_width):
         return None
 
     result = _compute_match_result(screen_gray, template_gray)

@@ -452,5 +452,107 @@ class ReturnJumpTests(unittest.TestCase):
         self.assertEqual(["B"], self.calls)
 
 
+class DependencyRecoveryTests(unittest.TestCase):
+    def test_backward_jump_recovers_failed_and_transitively_skipped_steps(self):
+        calls = []
+        attempts = 0
+        jumps = 0
+        first = Step(name="first", kind="action", on_failure="continue")
+        second = Step(name="second", kind="action", depends_on=[first.id])
+        third = Step(name="third", kind="action", depends_on=[second.id])
+
+        def runner(step, _context):
+            nonlocal attempts, jumps
+            calls.append(step.name)
+            if step.name == "first":
+                attempts += 1
+                return StepResult(attempts > 1)
+            if step.name == "jump":
+                jumps += 1
+                if jumps == 1:
+                    return StepResult(True, jump_to=first.id)
+            return StepResult(True)
+
+        registry = StepRegistry()
+        registry.register(StepDefinition("action", "Action", (), runner))
+        context = RuntimeContext(object(), Path("templates"), Event(), lambda _: None)
+        preset = Preset(name="recovery", steps=[first, second, third,
+                                                Step(name="jump", kind="action")])
+        report = StepEngine(registry).run(preset, context)
+        self.assertEqual("completed", report.status)
+        self.assertEqual(["first", "jump", "first", "second", "third", "jump"], calls)
+
+
+class StructuredEventTests(unittest.TestCase):
+    def context(self, events, **kwargs):
+        return RuntimeContext(object(), Path("templates"), Event(), lambda _: None,
+                              event=events.append, **kwargs)
+
+    def test_success_without_message_and_unknown_type_have_terminal_events(self):
+        registry = StepRegistry()
+        registry.register(StepDefinition("ok", "OK", (), lambda *_: StepResult(True)))
+        good = Step(name="same", kind="ok")
+        bad = Step(name="same", kind="unknown")
+        events = []
+        report = StepEngine(registry).run(Preset(name="events", steps=[good, bad]), self.context(events))
+        self.assertEqual("failed", report.status)
+        states = [(e["data"]["step_id"], e["data"]["state"]) for e in events if e["type"] == "step"]
+        self.assertEqual([(good.id, "running"), (good.id, "done"),
+                          (bad.id, "running"), (bad.id, "failed")], states)
+        self.assertEqual("enter", events[0]["data"]["action"])
+        self.assertEqual("exit", events[-1]["data"]["action"])
+        self.assertEqual(1, len({e["data"]["run_id"] for e in events}))
+
+    def test_nested_replace_inherits_callback_and_preserves_parent_frame(self):
+        from dataclasses import replace
+        registry = StepRegistry()
+        child = Preset(name="duplicate", steps=[Step(name="event", kind="ok")])
+        registry.register(StepDefinition("ok", "OK", (), lambda *_: StepResult(True)))
+        def nested(_step, context):
+            result = context.engine.run(child, replace(context, allow_external_jump=True))
+            return StepResult(result.status == "completed")
+        registry.register(StepDefinition("nested", "Nested", (), nested))
+        parent = Step(name="event", kind="nested")
+        events = []
+        engine = StepEngine(registry)
+        engine.run(Preset(name="duplicate", steps=[parent]), self.context(events, engine=engine))
+        enters = [e["data"] for e in events if e["type"] == "frame" and e["data"]["action"] == "enter"]
+        self.assertEqual(enters[0]["frame_id"], enters[1]["parent_frame_id"])
+        self.assertEqual(parent.id, enters[1]["parent_step_id"])
+        self.assertNotEqual(enters[0]["frame_id"], enters[1]["frame_id"])
+        self.assertEqual(enters[0]["run_id"], enters[1]["run_id"])
+
+    def test_empty_stop_and_exception_always_close_frames(self):
+        registry = StepRegistry()
+        def stop(_step, context):
+            context.stop_event.set()
+            return StepResult(True)
+        def fail(*_):
+            raise ValueError("boom")
+        registry.register(StepDefinition("stop", "Stop", (), stop))
+        registry.register(StepDefinition("fail", "Fail", (), fail))
+        for preset, status in [(Preset(name="events", ), "completed"), (Preset(name="events", loop_count=0), "failed"),
+                               (Preset(name="events", steps=[Step(name="event", kind="stop")]), "stopped"),
+                               (Preset(name="events", steps=[Step(name="event", kind="fail")]), "failed")]:
+            with self.subTest(status=status):
+                events = []
+                report = StepEngine(registry).run(preset, self.context(events))
+                self.assertEqual(status, report.status)
+                self.assertEqual("exit", events[-1]["data"]["action"])
+                self.assertEqual(status, events[-1]["data"]["status"])
+
+    def test_external_jump_emits_target_before_frame_exit(self):
+        registry = StepRegistry()
+        registry.register(StepDefinition("jump", "Jump", (), lambda *_: StepResult(True, jump_to="outside")))
+        events = []
+        report = StepEngine(registry).run(Preset(name="events", steps=[Step(name="event", kind="jump")]),
+                                          self.context(events, allow_external_jump=True))
+        self.assertEqual("outside", report.jump_to)
+        jumps = [e["data"] for e in events if e["type"] == "jump"]
+        self.assertEqual("outside", jumps[0]["target_step_id"])
+        self.assertTrue(jumps[0]["external"])
+        self.assertEqual("exit", events[-1]["data"]["action"])
+
+
 if __name__ == "__main__":
     unittest.main()

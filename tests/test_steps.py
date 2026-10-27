@@ -2,8 +2,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 import unittest
+from unittest.mock import patch
 
+import cv2
 import numpy as np
+
+from model_automation import vision
 
 from model_automation.engine import RuntimeContext, StepEngine, StepResult
 from model_automation.models import Preset, Step
@@ -866,6 +870,200 @@ class BranchTests(unittest.TestCase):
         self.assertEqual("completed", report.status)
 
 
+class RecognitionPerformanceAndRoiTests(unittest.TestCase):
+    def test_retries_convert_each_screenshot_once_and_reuse_template_gray_between_runs(self):
+        random = np.random.default_rng(103)
+        screen = random.integers(0, 255, (80, 100, 3), dtype=np.uint8)
+        vision.clear_template_cache()
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            for name in ("one.png", "two.png"):
+                save_image(folder / name, random.integers(0, 255, (10, 12, 3), dtype=np.uint8))
+            step = Step(name="find", kind="find_and_tap", params={
+                "templates": [{"file": "one.png"}, {"file": "two.png"}],
+                "attempts": 3, "interval": 0})
+            with (patch("model_automation.steps.find_template", return_value=None) as match,
+                  patch.object(vision.cv2, "cvtColor", wraps=cv2.cvtColor) as convert,
+                  patch.object(vision.cv2, "imdecode", wraps=cv2.imdecode) as decode):
+                for _run in range(2):
+                    result = run_find_and_tap(step, make_context(FakeDevice(screen), folder))
+                    self.assertFalse(result.success)
+                self.assertEqual(2, decode.call_count)
+                self.assertEqual(8, convert.call_count)  # 2 templates + 6 screenshots
+                self.assertEqual(12, match.call_count)
+                self.assertTrue(all(len(call.args) == 3 for call in match.call_args_list))
+                self.assertTrue(all(call.args[0].ndim == call.args[1].ndim == 2
+                                    for call in match.call_args_list))
+        vision.clear_template_cache()
+
+    def test_legacy_loader_and_three_argument_matcher_mocks_still_work(self):
+        screen = np.zeros((80, 100, 3), np.uint8)
+        with (patch("model_automation.steps.load_image", return_value=np.zeros((10, 12, 3), np.uint8)),
+              patch("model_automation.steps.find_template",
+                    side_effect=lambda _screen, _template, _threshold: vision.Match(20, 30, 0.95))):
+            device = FakeDevice(screen)
+            result = run_find_and_tap(Step(name="find", kind="find_and_tap", params={
+                "templates": [{"file": "mock.png"}]}), make_context(device, Path("templates")))
+        self.assertTrue(result.success)
+        self.assertEqual([(20, 30)], device.taps)
+
+    def test_roi_restores_device_coordinates_and_excludes_outside_match(self):
+        random = np.random.default_rng(107)
+        screen = random.integers(0, 255, (80, 100, 3), dtype=np.uint8)
+        template = random.integers(0, 255, (10, 12, 3), dtype=np.uint8)
+        screen[5:15, 2:14] = template
+        screen[60:70, 80:92] = template
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            save_image(folder / "target.png", template)
+            for enabled, expected in ((True, (86, 65)), (False, (8, 10))):
+                with self.subTest(enabled=enabled):
+                    device = FakeDevice(screen)
+                    step = Step(name="find", kind="find_and_tap", params={
+                        "templates": [{"file": "target.png", "threshold": 0.99}],
+                        "roi_enabled": enabled, "search_x": 75, "search_y": 55,
+                        "search_width": 25, "search_height": 25})
+                    result = run_find_and_tap(step, make_context(device, folder))
+                    self.assertTrue(result.success, result.message)
+                    self.assertEqual([expected], device.taps)
+            device = FakeDevice(screen)
+            step.params.update(roi_enabled=True, search_x=30, search_y=25,
+                               search_width=20, search_height=20)
+            self.assertFalse(run_find_and_tap(step, make_context(device, folder)).success)
+            self.assertEqual([], device.taps)
+
+    def test_invalid_roi_returns_failure_without_any_click_retry_or_branch(self):
+        random = np.random.default_rng(109)
+        screen = random.integers(0, 255, (80, 100, 3), dtype=np.uint8)
+        cases = [(0, 0, 0, 10), (0, 0, 10, 0), (-1, 0, 10, 10),
+                 (90, 70, 11, 10), (90, 70, 10, 11), (100, 80, 1, 1)]
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            save_image(folder / "target.png", screen[5:15, 2:14])
+            for x, y, width, height in cases:
+                with self.subTest(bounds=(x, y, width, height)):
+                    device = FakeDevice(screen)
+                    step = Step(name="find", kind="find_and_tap", params={
+                        "templates": [{"file": "target.png"}], "roi_enabled": True,
+                        "search_x": x, "search_y": y, "search_width": width,
+                        "search_height": height, "attempts": 0, "tap_between": True,
+                        "swipe_between": True})
+                    result = run_find_and_tap(step, make_context(device, folder))
+                    self.assertFalse(result.success)
+                    self.assertTrue("ROI" in result.message or "search_" in result.message)
+                    self.assertEqual([], device.actions)
+
+    def test_multiple_templates_choose_spatial_first_center_with_roi(self):
+        random = np.random.default_rng(113)
+        screen = random.integers(0, 255, (80, 100, 3), dtype=np.uint8)
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            save_image(folder / "lower.png", screen[60:70, 30:42])
+            save_image(folder / "upper.png", screen[30:40, 70:82])
+            device = FakeDevice(screen)
+            step = Step(name="find", kind="find_and_tap", params={
+                "templates": [{"file": "lower.png", "threshold": 0.99},
+                              {"file": "upper.png", "threshold": 0.99}],
+                "roi_enabled": True, "search_x": 25, "search_y": 25,
+                "search_width": 60, "search_height": 50, "require_all": True})
+            result = run_find_and_tap(step, make_context(device, folder))
+            self.assertTrue(result.success, result.message)
+            self.assertEqual([(76, 35)], device.taps)
+
+
+class RecognitionStopTests(unittest.TestCase):
+    def test_stop_during_screenshot_skips_matching_and_device_actions(self):
+        device = FakeDevice(np.zeros((80, 100, 3), np.uint8))
+        context = make_context(device, Path("templates"))
+        def screenshot():
+            context.stop_event.set()
+            return device.screen.copy()
+        step = Step(name="find", kind="find_and_tap", params={
+            "templates": [{"file": "mock.png"}], "attempts": 0,
+            "tap_between": True, "swipe_between": True})
+        with patch.object(device, "screenshot", side_effect=screenshot), \
+             patch("model_automation.steps.load_image", return_value=np.zeros((10, 12, 3), np.uint8)), \
+             patch("model_automation.steps.find_template") as match:
+            result = run_find_and_tap(step, context)
+        self.assertEqual("执行已停止", result.message)
+        match.assert_not_called()
+        self.assertEqual([], device.actions)
+
+    def test_stop_during_matching_skips_remaining_templates_and_actions(self):
+        for found in (None, vision.Match(20, 30, 0.95)):
+            with self.subTest(found=found):
+                device = FakeDevice(np.zeros((80, 100, 3), np.uint8))
+                context = make_context(device, Path("templates"))
+                def match(*_args):
+                    context.stop_event.set()
+                    return found
+                step = Step(name="find", kind="find_and_tap", params={
+                    "templates": [{"file": "one.png"}, {"file": "two.png"}],
+                    "attempts": 0, "tap_between": True, "swipe_between": True})
+                with patch("model_automation.steps.load_image", return_value=np.zeros((10, 12, 3), np.uint8)), \
+                     patch("model_automation.steps.find_template", side_effect=match) as matching:
+                    result = run_find_and_tap(step, context)
+                self.assertEqual("执行已停止", result.message)
+                matching.assert_called_once()
+                self.assertEqual([], device.actions)
+
+    def test_stop_during_final_match_prevents_click(self):
+        device = FakeDevice(np.zeros((80, 100, 3), np.uint8))
+        context = make_context(device, Path("templates"))
+        def match(*_args):
+            context.stop_event.set()
+            return vision.Match(20, 30, 0.95)
+        with patch("model_automation.steps.load_image", return_value=np.zeros((10, 12, 3), np.uint8)), \
+             patch("model_automation.steps.find_template", side_effect=match):
+            result = run_find_and_tap(Step(name="find", kind="find_and_tap", params={
+                "templates": [{"file": "mock.png"}]}), context)
+        self.assertEqual("执行已停止", result.message)
+        self.assertEqual([], device.actions)
+
+    def test_stop_during_retry_tap_prevents_following_swipe(self):
+        device = FakeDevice(np.zeros((80, 100, 3), np.uint8))
+        context = make_context(device, Path("templates"))
+        tap = device.tap
+        def stop_after_tap(x, y):
+            tap(x, y)
+            context.stop_event.set()
+        step = Step(name="find", kind="find_and_tap", params={
+            "templates": [{"file": "mock.png"}], "attempts": 0,
+            "tap_between": True, "swipe_between": True})
+        with patch.object(device, "tap", side_effect=stop_after_tap), \
+             patch("model_automation.steps.load_image", return_value=np.zeros((10, 12, 3), np.uint8)), \
+             patch("model_automation.steps.find_template", return_value=None):
+            result = run_find_and_tap(step, context)
+        self.assertEqual("执行已停止", result.message)
+        self.assertEqual(["tap"], [action for action, _ in device.actions])
+
+    def test_stop_between_zero_interval_clicks_prevents_next_click(self):
+        device = FakeDevice(np.zeros((80, 100, 3), np.uint8))
+        context = make_context(device, Path("templates"))
+        # Simulate stop arriving immediately after an interruptible wait returns.
+        def wait(_seconds):
+            context.stop_event.set()
+            return True
+        with patch("model_automation.steps.load_image", return_value=np.zeros((10, 12, 3), np.uint8)), \
+             patch("model_automation.steps.find_template", return_value=vision.Match(20, 30, 0.95)), \
+             patch.object(context, "wait", side_effect=wait):
+            result = run_find_and_tap(Step(name="multi", kind="find_and_tap", params={
+                "templates": [{"file": "mock.png"}], "tap_mode": "multi",
+                "click_count": 3, "click_interval": 0}), context)
+        self.assertEqual("执行已停止", result.message)
+        self.assertEqual([(20, 30)], device.taps)
+
+    def test_stopped_direct_device_steps_do_not_start_actions(self):
+        for kind in ("tap", "swipe"):
+            with self.subTest(kind=kind):
+                device = FakeDevice(np.zeros((80, 100, 3), np.uint8))
+                context = make_context(device, Path("templates"))
+                context.stop_event.set()
+                result = REGISTRY.get(kind).runner(Step(name=kind, kind=kind), context)
+                self.assertEqual("执行已停止", result.message)
+                self.assertEqual([], device.actions)
+
+
 class InfiniteRetryTests(unittest.TestCase):
     class DelayedDevice(FakeDevice):
         def __init__(self, base: np.ndarray, appears_after: int) -> None:
@@ -1002,6 +1200,64 @@ class EndLoopTests(unittest.TestCase):
         self.assertEqual(1, sum(1 for line in logs if "[1/3]" in line))
         self.assertEqual(1, sum(1 for line in logs if "[2/3]" in line))
         self.assertEqual(0, sum(1 for line in logs if "[3/3]" in line))
+
+
+class RuntimeValidationTests(unittest.TestCase):
+    def test_invalid_fields_fail_before_any_device_action(self):
+        cases = [
+            ("tap", {"wait_after": "bad"}),
+            ("tap", {"x": 1.5}),
+            ("tap", {"y": True}),
+            ("swipe", {"wait_after": float("inf")}),
+            ("swipe", {"duration": -1}),
+            ("wait", {"seconds": float("nan")}),
+            ("find_and_tap", {"attempts": -1}),
+            ("find_and_tap", {"wait_after": "bad"}),
+            ("find_and_tap", {"require_all": "false"}),
+            ("find_and_tap", {"click_count": 0}),
+            ("find_and_tap", {"tap_between_x": -1}),
+            ("find_and_tap", {"threshold": True}),
+        ]
+        class NoActionDevice:
+            def __getattr__(self, name):
+                raise AssertionError(f"unexpected device action: {name}")
+        for kind, params in cases:
+            with self.subTest(kind=kind, params=params):
+                if kind == "find_and_tap":
+                    params = {"templates": [{"file": "target.png", "threshold": 0.8}], **params}
+                    if "threshold" in params:
+                        params["templates"][0]["threshold"] = params.pop("threshold")
+                result = REGISTRY.get(kind).runner(
+                    Step(name="invalid", kind=kind, params=params),
+                    make_context(NoActionDevice(), Path("templates")),
+                )
+                self.assertFalse(result.success)
+
+    def test_tap_uses_registered_coordinate_defaults(self):
+        device = FakeDevice(np.zeros((10, 10, 3), dtype=np.uint8))
+        result = REGISTRY.get("tap").runner(
+            Step(name="default", kind="tap"), make_context(device, Path("templates")))
+        self.assertTrue(result.success)
+        self.assertEqual([(540, 1000)], device.taps)
+
+    def test_missing_or_corrupt_template_blocks_require_all_but_not_any(self):
+        random = np.random.default_rng(91)
+        screen = random.integers(0, 255, (80, 100, 3), dtype=np.uint8)
+        with TemporaryDirectory() as directory:
+            template_dir = Path(directory)
+            save_image(template_dir / "target.png", screen[20:40, 30:55].copy())
+            (template_dir / "corrupt.png").write_bytes(b"not an image")
+            for missing in ("missing.png", "corrupt.png"):
+                for require_all in (True, False):
+                    with self.subTest(missing=missing, require_all=require_all):
+                        device = FakeDevice(screen)
+                        step = Step(name="find", kind="find_and_tap", params={
+                            "templates": [{"file": "target.png"}, {"file": missing}],
+                            "require_all": require_all,
+                        })
+                        result = run_find_and_tap(step, make_context(device, template_dir))
+                        self.assertEqual(not require_all, result.success)
+                        self.assertEqual([] if require_all else [(42, 30)], device.taps)
 
 
 if __name__ == "__main__":

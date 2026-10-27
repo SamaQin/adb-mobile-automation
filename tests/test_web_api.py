@@ -1,3 +1,7 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+from unittest.mock import patch
 from pathlib import Path
 from queue import Queue
 from tempfile import TemporaryDirectory
@@ -298,9 +302,55 @@ class WebApiTests(unittest.TestCase):
             any(event["type"] == "step" and event["data"]["state"] == "running" for event in events)
         )
 
+        display_events = [event for event in events if event["type"] in {"log", "device"}]
         with self.client.websocket_connect("/ws/events") as websocket:
-            replay = [websocket.receive_json() for _event in events]
-        self.assertEqual(events, replay)
+            replay = [websocket.receive_json() for _event in display_events]
+            snapshot = websocket.receive_json()
+        self.assertEqual(display_events, replay)
+        self.assertEqual("status", snapshot["type"])
+        self.assertEqual("idle", snapshot["data"]["state"])
+        self.assertEqual("stopped", snapshot["data"]["last_status"])
+        self.assertIn("node_states", snapshot["data"])
+        self.assertEqual(events[-1]["seq"], snapshot["seq"])
+
+    def test_template_list_indexes_references_once_and_thumbnails_revalidate(self) -> None:
+        from model_automation.operations import template_reference_index
+        preset = Preset(name="templates", steps=[Step(name="recognize", kind="find_and_tap", params={
+            "templates": [{"file": "a.png", "threshold": 0.8}, {"file": "b.png", "threshold": 0.8}]
+        })])
+        self.save([preset])
+        self.store.template_dir.mkdir(parents=True, exist_ok=True)
+        for name in ["a.png", "b.png"]:
+            (self.store.template_dir / name).write_bytes(png_bytes(self.device.screen))
+        with patch("web_server.app.template_reference_index", wraps=template_reference_index) as index:
+            records = self.client.get("/api/templates").json()
+            self.assertEqual(1, index.call_count)
+        self.assertEqual(["a.png", "b.png"], [record["name"] for record in records])
+        self.assertTrue(all(record["references"][0]["step_id"] == preset.steps[0].id for record in records))
+        first = self.client.get("/api/templates/a.png/thumbnail?max_width=20")
+        self.assertEqual(200, first.status_code)
+        unchanged = self.client.get("/api/templates/a.png/thumbnail?max_width=20", headers={"If-None-Match": first.headers["etag"]})
+        self.assertEqual(304, unchanged.status_code)
+        (self.store.template_dir / "a.png").write_bytes(png_bytes(np.zeros((30, 40, 3), dtype=np.uint8)))
+        changed = self.client.get("/api/templates/a.png/thumbnail?max_width=20", headers={"If-None-Match": first.headers["etag"]})
+        self.assertEqual(200, changed.status_code)
+        self.assertNotEqual(first.headers["etag"], changed.headers["etag"])
+        self.assertNotEqual(records[0]["revision"], self.client.get("/api/templates").json()[0]["revision"])
+
+    def test_h264_stream_forwards_encoded_packets_and_validates_codec(self) -> None:
+        class H264Screencast(FakeScreencast):
+            def subscribe_h264(self):
+                self.subscriber = FakeSubscriber([b"encoded-session", b"encoded-packet", None])
+                return self.subscriber
+        screencast = H264Screencast()
+        with TestClient(create_app(config_store=self.store, device=self.device, screencast=screencast)) as client:
+            response = client.get("/api/device/stream?codec=h264")
+            self.assertEqual(200, response.status_code)
+            self.assertIn("application/x-adb-h264", response.headers["content-type"])
+            self.assertEqual(b"encoded-sessionencoded-packet", response.content)
+            self.assertEqual(400, client.get("/api/device/stream?codec=invalid").status_code)
+        with TestClient(create_app(config_store=self.store, device=self.device, screencast=FakeScreencast())) as client:
+            self.assertEqual(503, client.get("/api/device/stream?codec=h264").status_code)
 
     def test_static_files_use_spa_fallback(self) -> None:
         root = Path(self.temporary.name)
@@ -313,6 +363,43 @@ class WebApiTests(unittest.TestCase):
         ) as client:
             self.assertEqual("asset", client.get("/asset.txt").text)
             self.assertEqual("<main>app</main>", client.get("/nested/route").text)
+
+    def test_upload_rechecks_mutability_after_body_wait(self) -> None:
+        preset = Preset(name="running", steps=[Step(name="wait", kind="wait", params={"seconds": 5})])
+        self.save([preset])
+        entered, release = Event(), Event()
+        async def delayed_upload(*_args):
+            entered.set()
+            await asyncio.to_thread(release.wait, 2)
+            return "late.png", png_bytes(self.device.screen)
+        with patch("web_server.app._uploaded_file", side_effect=delayed_upload):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(self.client.post, "/api/templates/upload", content=b"body")
+                try:
+                    self.assertTrue(entered.wait(1))
+                    self.assertEqual(200, self.client.post("/api/run", json={"preset_id": preset.id}).status_code)
+                    release.set()
+                    self.assertEqual(409, future.result(timeout=2).status_code)
+                    self.assertFalse((self.store.template_dir / "late.png").exists())
+                finally:
+                    release.set()
+                    self.client.post("/api/stop")
+
+    def test_idle_websocket_disconnect_unsubscribes_without_events(self) -> None:
+        manager = self.client.app.state.runtime
+        with self.client.websocket_connect("/ws/events"):
+            pass
+        self.assertEqual([], manager._subscribers)
+
+    def test_concurrent_duplicates_do_not_lose_updates(self) -> None:
+        preset = Preset(name="source")
+        self.save([preset])
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            responses = list(pool.map(lambda _: self.client.post(f"/api/presets/{preset.id}/duplicate", json={}), range(8)))
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        presets = self.store.load().presets
+        self.assertEqual(9, len(presets))
+        self.assertEqual(9, len({preset.name for preset in presets}))
 
 
 if __name__ == "__main__":

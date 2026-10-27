@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from .models import AppConfig, Preset, Step, canonical_step_kind, new_id
-from .registry import StepRegistry
+from .registry import StepRegistry, validate_number
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
@@ -393,31 +393,39 @@ def run_preset_references(
     return references
 
 
-def template_references(
-    presets: Iterable[Preset], filename: str
-) -> list[dict[str, str]]:
-    target = filename.casefold()
-    references: list[dict[str, str]] = []
+def template_reference_index(
+    presets: Iterable[Preset],
+) -> dict[str, list[dict[str, str]]]:
+    """Index template references in one recursive traversal per preset."""
+    index: dict[str, list[dict[str, str]]] = {}
     for owner in presets:
         for step in iter_steps(owner):
             templates = step.params.get("templates", [])
             if not isinstance(templates, list):
                 continue
-            if not any(
-                isinstance(item, dict)
-                and str(item.get("file", "")).casefold() == target
-                for item in templates
-            ):
-                continue
-            references.append(
-                {
-                    "preset_id": owner.id,
-                    "preset_name": owner.name,
-                    "step_id": step.id,
-                    "step_name": step.name,
-                }
-            )
-    return references
+            seen: set[str] = set()
+            for item in templates:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("file", "")).casefold()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                index.setdefault(key, []).append(
+                    {
+                        "preset_id": owner.id,
+                        "preset_name": owner.name,
+                        "step_id": step.id,
+                        "step_name": step.name,
+                    }
+                )
+    return index
+
+
+def template_references(
+    presets: Iterable[Preset], filename: str
+) -> list[dict[str, str]]:
+    return template_reference_index(presets).get(filename.casefold(), [])
 
 
 def update_template_reference_resolutions(
@@ -481,8 +489,8 @@ def _positive_resolution(raw: Any, label: str) -> tuple[int, int] | None:
     if not isinstance(raw, dict):
         raise ValidationError(f"{label}屏幕分辨率必须是对象")
     try:
-        width = int(raw.get("width", 0))
-        height = int(raw.get("height", 0))
+        width = validate_number(raw.get("width", 0), "width", integer=True, minimum=1)
+        height = validate_number(raw.get("height", 0), "height", integer=True, minimum=1)
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"{label}屏幕分辨率无效") from exc
     if width <= 0 or height <= 0:
@@ -498,7 +506,7 @@ def _validate_templates(params: dict[str, Any], step_name: str) -> None:
         if not isinstance(item, dict):
             raise ValidationError(f"识别步骤“{step_name}”的模板记录无效")
         try:
-            threshold = float(item.get("threshold", 0.8))
+            threshold = validate_number(item.get("threshold", 0.8), "threshold", minimum=0, maximum=1)
         except (TypeError, ValueError) as exc:
             raise ValidationError(f"识别步骤“{step_name}”的模板阈值无效") from exc
         if not 0.0 <= threshold <= 1.0:
@@ -585,7 +593,10 @@ def _parse_step_list(
         params = raw_params
         if not isinstance(params, dict):
             raise ValidationError(f"步骤“{name}”的 params 必须是对象")
-        params = deepcopy(params)
+        try:
+            params = definition.validate_params(params)
+        except ValueError as exc:
+            raise ValidationError(f"步骤“{name}”：{exc}") from exc
         branches = params.get("branches")
         if branches is not None:
             if kind != "find_and_tap":

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from threading import Event, RLock, Thread
 from typing import Any, Callable
+from uuid import uuid4
 
 from model_automation.config import ConfigStore
 from model_automation.device import DeviceError
@@ -25,6 +27,10 @@ class RuntimeConflict(RuntimeError):
 class _Subscriber:
     loop: asyncio.AbstractEventLoop
     queue: asyncio.Queue[dict[str, Any]]
+    closed: asyncio.Event = field(default_factory=asyncio.Event)
+    pending: deque[dict[str, Any]] = field(default_factory=deque)
+    scheduled: bool = False
+    overflow: bool = False
 
 
 @dataclass
@@ -144,9 +150,12 @@ class _LogParser:
         if text.startswith("  完成：") and step_id:
             events.append({"type": "step", "data": {"step_id": step_id, "state": "done"}})
             frame.current_step = None
-        elif text.startswith("  中止：") and step_id:
-            events.append({"type": "step", "data": {"step_id": step_id, "state": "failed"}})
-            frame.current_step = None
+        elif text.startswith("  中止："):
+            if step_id:
+                events.append({"type": "step", "data": {"step_id": step_id, "state": "failed"}})
+            self.frames.pop()
+            if self.frames:
+                events.append(self._status_event(self.frames[-1]))
         elif text.startswith("  跳过："):
             if step_id:
                 state = "skipped"
@@ -163,7 +172,7 @@ class _LogParser:
             if step_id:
                 events.append({"type": "step", "data": {"step_id": step_id, "state": state}})
             frame.current_step = None
-        elif text == "预设执行完成":
+        elif text in {"预设执行完成", "预设没有启用的步骤"}:
             if step_id:
                 events.append({"type": "step", "data": {"step_id": step_id, "state": "done"}})
             self.frames.pop()
@@ -181,16 +190,26 @@ class RuntimeManager:
         registry: StepRegistry = REGISTRY,
         engine_factory: Callable[[StepRegistry], StepEngine] = StepEngine,
         event_limit: int = 200,
+        subscriber_limit: int = 200,
     ) -> None:
         self.config_store = config_store
         self.device = device
         self.registry = registry
         self.engine_factory = engine_factory
         self._lock = RLock()
+        self._mutation_lock = RLock()
+        self._subscriber_limit = max(1, subscriber_limit)
         self._events: deque[dict[str, Any]] = deque(maxlen=event_limit)
         self._subscribers: list[_Subscriber] = []
         self._stop_event: Event | None = None
         self._worker: Thread | None = None
+        self._server_id = uuid4().hex
+        self._seq = 0
+        self._run_id: str | None = None
+        self._node_states: dict[str, dict[str, Any]] = {}
+        self._frames: dict[str, dict[str, Any]] = {}
+        self._root_cycle = 0
+        self._structured = False
         self._status: dict[str, Any] = {
             "state": "idle",
             "preset_id": None,
@@ -209,29 +228,70 @@ class RuntimeManager:
         if self.is_running:
             raise RuntimeConflict("请先停止当前预设")
 
+    @contextmanager
+    def mutation(self):
+        """Serialize a complete synchronous mutation with start admission."""
+        with self._mutation_lock:
+            self.ensure_mutable()
+            yield
+
     def status(self) -> dict[str, Any]:
         with self._lock:
-            return deepcopy(self._status)
+            return deepcopy({**self._status, "server_id": self._server_id, "run_id": self._run_id, "seq": self._seq,
+                             "node_states": self._node_states, "frames": list(self._frames.values()),
+                             "root_cycle": self._root_cycle})
 
     def events(self) -> list[dict[str, Any]]:
         with self._lock:
             return deepcopy(list(self._events))
 
-    @staticmethod
-    def _enqueue(queue: asyncio.Queue[dict[str, Any]], event: dict[str, Any]) -> None:
-        queue.put_nowait(deepcopy(event))
+    def _drain_subscriber(self, subscriber: _Subscriber) -> None:
+        with self._lock:
+            subscriber.scheduled = False
+            if subscriber not in self._subscribers:
+                return
+            if subscriber.overflow:
+                self._subscribers.remove(subscriber)
+                subscriber.pending.clear()
+                subscriber.closed.set()
+                return
+            while subscriber.pending:
+                if subscriber.queue.full():
+                    self._subscribers.remove(subscriber)
+                    subscriber.pending.clear()
+                    subscriber.closed.set()
+                    return
+                subscriber.queue.put_nowait(subscriber.pending.popleft())
 
     def _publish(self, event: dict[str, Any]) -> None:
         with self._lock:
-            self._events.append(deepcopy(event))
-            subscribers = list(self._subscribers)
-        for subscriber in subscribers:
-            try:
-                subscriber.loop.call_soon_threadsafe(
-                    self._enqueue, subscriber.queue, event
-                )
-            except RuntimeError:
-                self.unsubscribe(subscriber)
+            self._seq += 1
+            event = dict(event)
+            event.update(server_id=self._server_id, run_id=self._run_id, seq=self._seq)
+            if event["type"] == "status":
+                event["data"] = {**self._status, **event.get("data", {}),
+                    "server_id": self._server_id, "run_id": self._run_id, "seq": self._seq,
+                    "root_cycle": self._root_cycle, "frames": list(self._frames.values())}
+            # Published envelopes are owned here and read-only for queue consumers.
+            # Copy once before sharing with history and every subscriber.
+            event = deepcopy(event)
+            if event["type"] == "step":
+                data = event["data"]
+                data.setdefault("error", data.get("message", "") if data.get("state") in {"failed", "skipped"} else "")
+                self._node_states[data["step_id"]] = deepcopy(data)
+            self._events.append(event)
+            for subscriber in list(self._subscribers):
+                # Bound callbacks as well as the asyncio queue when its loop is busy.
+                if len(subscriber.pending) >= self._subscriber_limit:
+                    subscriber.overflow = True
+                elif not subscriber.overflow:
+                    subscriber.pending.append(event)
+                if not subscriber.scheduled:
+                    subscriber.scheduled = True
+                    try:
+                        subscriber.loop.call_soon_threadsafe(self._drain_subscriber, subscriber)
+                    except RuntimeError:
+                        self._subscribers.remove(subscriber)
 
     def publish_device(self, data: dict[str, Any]) -> None:
         self._publish({"type": "device", "data": data})
@@ -239,9 +299,14 @@ class RuntimeManager:
     async def subscribe(
         self,
     ) -> tuple[list[dict[str, Any]], asyncio.Queue[dict[str, Any]], _Subscriber]:
-        subscriber = _Subscriber(asyncio.get_running_loop(), asyncio.Queue())
+        """Return an editable replay snapshot and a read-only shared live queue."""
+        subscriber = _Subscriber(asyncio.get_running_loop(), asyncio.Queue(maxsize=self._subscriber_limit))
         with self._lock:
-            backlog = deepcopy(list(self._events))
+            # Replay display data only; state always comes from the final snapshot.
+            backlog = deepcopy([event for event in self._events
+                                if event["type"] in {"log", "device"}])
+            backlog.append({"type": "status", "server_id": self._server_id, "run_id": self._run_id,
+                            "seq": self._seq, "data": self.status()})
             self._subscribers.append(subscriber)
         return backlog, subscriber.queue, subscriber
 
@@ -249,24 +314,79 @@ class RuntimeManager:
         with self._lock:
             if subscriber in self._subscribers:
                 self._subscribers.remove(subscriber)
+            subscriber.pending.clear()
 
     def _update_status(self, data: dict[str, Any]) -> None:
         with self._lock:
             self._status.update(data)
 
+    def _engine_event(self, event: dict[str, Any]) -> None:
+        with self._lock:
+            self._structured = True
+            data = deepcopy(event["data"])
+            frame_id = data["frame_id"]
+            kind = event["type"]
+            if kind == "frame" and data["action"] == "enter":
+                self._frames[frame_id] = {**data, "step_id": None, "step_index": 0}
+            elif kind == "frame" and data["action"] == "exit":
+                self._frames.pop(frame_id, None)
+                for node in list(self._node_states.values()):
+                    if node.get("frame_id") == frame_id and node.get("state") == "running":
+                        self._publish({"type": "step", "data": {**node, "state": "idle"}})
+            elif kind == "cycle":
+                frame = self._frames.get(frame_id)
+                if frame is not None:
+                    frame.update(data, step_id=None, step_index=0)
+                if data.get("parent_frame_id") is None:
+                    self._root_cycle = data["cycle"]
+                    self._node_states.clear()
+                else:
+                    self._node_states = {key: node for key, node in self._node_states.items()
+                                         if node.get("frame_id") != frame_id}
+            elif kind == "step":
+                frame = self._frames.get(frame_id)
+                if frame is not None and data["state"] != "skipped":
+                    frame.update(step_id=data["step_id"], step_index=data.get("step_index", 0))
+                self._publish({"type": "step", "data": data})
+            if self._frames:
+                frame = next(reversed(self._frames.values()))
+                self._status.update({key: frame.get(key) for key in
+                                     ("preset_id", "cycle", "step_id", "step_index", "step_count",
+                                      "frame_id", "parent_frame_id")})
+            else:
+                self._status.update(frame_id=None, parent_frame_id=None, step_id=None,
+                                    step_index=0)
+            self._publish({"type": "status", "data": {"reset_frame_id": frame_id} if kind == "cycle" else {}})
+
     def _log(self, parser: _LogParser, text: str) -> None:
-        step_id, parsed_events = parser.process(text)
-        self._publish({"type": "log", "data": {"text": text, "step_id": step_id}})
-        for event in parsed_events:
-            if event["type"] == "status":
-                self._update_status(event["data"])
-            self._publish(event)
+        with self._lock:
+            if self._structured:
+                step_id = self._status.get("step_id")
+                parsed_events = []
+            else:
+                step_id, parsed_events = parser.process(text)
+            self._publish({"type": "log", "data": {"text": text, "step_id": step_id}})
+            for event in parsed_events:
+                if event["type"] == "status":
+                    if len(parser.frames) == 1:
+                        cycle = event["data"]["cycle"]
+                        if cycle != self._root_cycle:
+                            self._node_states.clear()
+                        self._root_cycle = cycle
+                    self._update_status(event["data"])
+                self._publish(event)
 
     def start(self, preset_id: str) -> dict[str, Any]:
         stop_event = Event()
-        with self._lock:
+        with self._mutation_lock, self._lock:
             if self._status["state"] in {"starting", "running", "stopping"}:
                 raise RuntimeConflict("已有预设正在运行")
+            self._run_id = uuid4().hex
+            self._node_states.clear()
+            self._frames.clear()
+            self._root_cycle = 0
+            self._structured = False
+            self._events.clear()
             self._status = {
                 "state": "starting",
                 "preset_id": preset_id,
@@ -308,7 +428,7 @@ class RuntimeManager:
                 "step_id": None,
             }
 
-        self._publish({"type": "status", "data": self.status()})
+        self._publish({"type": "status", "data": {}})
         started_status = self.status()
         label = ACCELERATION_LABELS.get(get_acceleration(), get_acceleration())
         self._log(parser, f"加速模式：{label}")
@@ -324,11 +444,18 @@ class RuntimeManager:
                     engine=engine,
                     presets=presets,
                     preset_path=((target.id, target.name),),
+                    event=self._engine_event,
+                    run_id=self._run_id,
                 )
                 report = engine.run(target, context)
             except Exception as exc:
                 report = ExecutionReport("failed", str(exc))
             with self._lock:
+                self._frames.clear()
+                parser.frames.clear()
+                for node in self._node_states.values():
+                    if node.get("state") == "running":
+                        node["state"] = "idle"
                 self._status = {
                     "state": "idle",
                     "preset_id": None,
@@ -341,12 +468,12 @@ class RuntimeManager:
                 }
                 self._stop_event = None
                 self._worker = None
-            self._publish(
-                {
-                    "type": "finished",
-                    "data": {"status": report.status, "message": report.message},
-                }
-            )
+                self._publish(
+                    {
+                        "type": "finished",
+                        "data": {**self.status(), "status": report.status, "message": report.message},
+                    }
+                )
 
         thread = Thread(target=worker, name="automation-web-runtime", daemon=True)
         with self._lock:
@@ -360,8 +487,7 @@ class RuntimeManager:
                 raise RuntimeConflict("当前没有正在运行的预设")
             stop_event = self._stop_event
             self._status["state"] = "stopping"
-            status = deepcopy(self._status)
-        if stop_event is not None:
-            stop_event.set()
-        self._publish({"type": "status", "data": status})
-        return status
+            if stop_event is not None:
+                stop_event.set()
+            self._publish({"type": "status", "data": {}})
+            return self.status()

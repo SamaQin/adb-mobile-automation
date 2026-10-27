@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from pathlib import Path
@@ -13,6 +14,7 @@ import cv2
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 import numpy as np
 
 from model_automation.config import ConfigError, ConfigStore, PROJECT_ROOT
@@ -26,6 +28,7 @@ from model_automation.operations import (
     imported_preset_name,
     run_preset_references,
     template_references,
+    template_reference_index,
     update_template_reference_resolutions,
     validate_config,
     validate_template_filename,
@@ -42,6 +45,7 @@ from model_automation.vision import acceleration_backend, load_image, set_accele
 
 from .runtime import RuntimeConflict, RuntimeManager
 from .screencast import ScreencastError, ScrcpyScreencast
+from .template_assets import TemplateAssets
 
 
 MAX_UPLOAD_SIZE = 200 * 1024 * 1024
@@ -69,13 +73,6 @@ def _load_config(store: ConfigStore) -> AppConfig:
         return store.load()
     except ConfigError as exc:
         raise _detail(400, str(exc)) from exc
-
-
-def _mutable(runtime: RuntimeManager) -> None:
-    try:
-        runtime.ensure_mutable()
-    except RuntimeConflict as exc:
-        raise _detail(409, str(exc)) from exc
 
 
 def _device_image(device: Any) -> np.ndarray:
@@ -141,10 +138,20 @@ def _write_atomic(path: Path, content: bytes) -> None:
 async def _uploaded_file(
     request: Request, field_names: tuple[str, ...] = ("file",)
 ) -> tuple[str, bytes]:
-    content = await request.body()
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise _detail(400, "上传文件过大")
-    content_type = request.headers.get("content-type", "")
+    chunks = bytearray()
+    async for chunk in request.stream():
+        if len(chunks) + len(chunk) > MAX_UPLOAD_SIZE:
+            raise _detail(400, "上传文件过大")
+        chunks.extend(chunk)
+    return await run_in_threadpool(
+        _parse_uploaded_file, bytes(chunks), request.headers.get("content-type", ""),
+        request.headers.get("x-filename", ""), field_names,
+    )
+
+
+def _parse_uploaded_file(
+    content: bytes, content_type: str, filename: str, field_names: tuple[str, ...]
+) -> tuple[str, bytes]:
     if content_type.lower().startswith("multipart/form-data"):
         envelope = (
             f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
@@ -157,7 +164,6 @@ async def _uploaded_file(
             if field in field_names and filename:
                 return filename, part.get_payload(decode=True) or b""
         raise _detail(400, "上传请求中缺少文件")
-    filename = request.headers.get("x-filename", "")
     if not filename:
         raise _detail(400, "上传请求中缺少文件名")
     return filename, content
@@ -249,6 +255,7 @@ def create_app(
                 adb_executable,
                 _scrcpy_server_path(),
             )
+    assets = TemplateAssets()
     application = FastAPI(title="ADB Automation Web API")
     application.state.config_store = store
     application.state.device = injected_device
@@ -349,11 +356,19 @@ def create_app(
         return screencast_manager.status()
 
     @application.get("/api/device/stream")
-    def device_stream() -> StreamingResponse:
+    def device_stream(codec: str = Query(default="jpeg")) -> StreamingResponse:
+        if codec not in {"jpeg", "h264"}:
+            raise _detail(400, "投屏格式仅支持 jpeg 或 h264")
         if screencast_manager is None:
             raise _detail(503, "当前设备不支持实时投屏")
         try:
-            subscriber = screencast_manager.subscribe()
+            if codec == "h264":
+                subscribe_h264 = getattr(screencast_manager, "subscribe_h264", None)
+                if subscribe_h264 is None:
+                    raise _detail(503, "当前投屏服务不支持 H.264 直传")
+                subscriber = subscribe_h264()
+            else:
+                subscriber = screencast_manager.subscribe()
         except ScreencastError as exc:
             raise _detail(503, str(exc)) from exc
 
@@ -370,18 +385,18 @@ def create_app(
                     if frame is None:
                         break
                     screencast_manager.touch(subscriber)
-                    yield len(frame).to_bytes(4, "big") + frame
+                    yield frame if codec == "h264" else len(frame).to_bytes(4, "big") + frame
             finally:
                 screencast_manager.unsubscribe(subscriber)
 
         return StreamingResponse(
             frames(),
-            media_type="application/octet-stream",
+            media_type="application/x-adb-h264; version=1" if codec == "h264" else "application/octet-stream",
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate",
                 "Pragma": "no-cache",
                 "X-Accel-Buffering": "no",
-                "X-Stream-Format": "jpeg-length-prefixed",
+                "X-Stream-Format": "h264-packet-v1" if codec == "h264" else "jpeg-length-prefixed",
             },
         )
 
@@ -391,15 +406,15 @@ def create_app(
 
     @application.put("/api/config")
     def put_config(payload: Any = Body(...)) -> dict[str, Any]:
-        _mutable(manager)
-        try:
-            config = config_from_payload(
-                payload, registry=registry, normalize_dependencies=True
-            )
-            store.save(config)
-        except (ValidationError, ConfigError) as exc:
-            raise _detail(400, str(exc)) from exc
-        return config.to_dict()
+        with manager.mutation():
+            try:
+                config = config_from_payload(
+                    payload, registry=registry, normalize_dependencies=True
+                )
+                store.save(config)
+            except (ValidationError, ConfigError) as exc:
+                raise _detail(400, str(exc)) from exc
+            return config.to_dict()
 
     @application.get("/api/step-definitions")
     def get_step_definitions() -> list[dict[str, Any]]:
@@ -423,23 +438,23 @@ def create_app(
     def duplicate_preset(
         preset_id: str, payload: dict[str, Any] | None = Body(default=None)
     ) -> dict[str, Any]:
-        _mutable(manager)
-        config = _load_config(store)
-        source = next((preset for preset in config.presets if preset.id == preset_id), None)
-        if source is None:
-            raise _detail(404, "找不到预设")
-        requested = str((payload or {}).get("name", "")).strip()
-        existing_names = [preset.name for preset in config.presets]
-        name = requested or duplicate_preset_name(source.name, existing_names)
-        if not name:
-            raise _detail(400, "预设名称不能为空")
-        if name in existing_names:
-            raise _detail(400, "已有同名预设")
-        duplicate = clone_preset(source, name=name)
-        config.presets.append(duplicate)
-        config.selected_preset_id = duplicate.id
-        store.save(config)
-        return {"preset": duplicate.to_dict(), "selected_preset_id": duplicate.id}
+        with manager.mutation():
+            config = _load_config(store)
+            source = next((preset for preset in config.presets if preset.id == preset_id), None)
+            if source is None:
+                raise _detail(404, "找不到预设")
+            requested = str((payload or {}).get("name", "")).strip()
+            existing_names = [preset.name for preset in config.presets]
+            name = requested or duplicate_preset_name(source.name, existing_names)
+            if not name:
+                raise _detail(400, "预设名称不能为空")
+            if name in existing_names:
+                raise _detail(400, "已有同名预设")
+            duplicate = clone_preset(source, name=name)
+            config.presets.append(duplicate)
+            config.selected_preset_id = duplicate.id
+            store.save(config)
+            return {"preset": duplicate.to_dict(), "selected_preset_id": duplicate.id}
 
     @application.get("/api/presets/{preset_id}/references")
     def preset_reference_list(preset_id: str) -> dict[str, Any]:
@@ -478,171 +493,183 @@ def create_app(
     def templates() -> list[dict[str, Any]]:
         config = _load_config(store)
         store.template_dir.mkdir(parents=True, exist_ok=True)
+        references = template_reference_index(config.presets)
         records = []
         for path in sorted(store.template_dir.iterdir(), key=lambda item: item.name.casefold()):
             if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".bmp"}:
                 continue
-            image = load_image(path)
-            if image is None:
+            metadata = assets.metadata(path)
+            if metadata is None:
                 continue
-            records.append(
-                _template_record(path, image, template_references(config.presets, path.name))
-            )
+            records.append({
+                "name": path.name, "width": metadata.width, "height": metadata.height,
+                "size": metadata.size, "revision": metadata.revision,
+                "references": references.get(path.name.casefold(), []),
+            })
         return records
 
     @application.get("/api/templates/{name}/thumbnail")
     def template_thumbnail(
-        name: str, max_width: int = Query(default=240, ge=1, le=2048)
+        request: Request, name: str, max_width: int = Query(default=240, ge=1, le=2048)
     ) -> Response:
-        path = _template_path(store, name)
-        image = load_image(path)
-        if image is None:
+        thumbnail = assets.thumbnail(_template_path(store, name), max_width)
+        if thumbnail is None:
             raise _detail(404, "找不到模板图片")
-        if image.shape[1] > max_width:
-            scale = max_width / image.shape[1]
-            height = max(1, int(round(image.shape[0] * scale)))
-            image = cv2.resize(image, (max_width, height), interpolation=cv2.INTER_AREA)
-        return Response(_encode_image(image, ".png"), media_type="image/png")
+        content, etag = thumbnail
+        headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(content, media_type="image/png", headers=headers)
 
     @application.post("/api/templates/upload")
     async def upload_template(request: Request) -> dict[str, Any]:
-        _mutable(manager)
-        filename, content = await _uploaded_file(request)
-        filename = _template_name(filename)
-        image = _decode_image(content)
-        path = store.template_dir / filename
-        _write_atomic(path, content)
-        config = _load_config(store)
-        return _template_record(path, image, template_references(config.presets, filename))
+        uploaded_name, content = await _uploaded_file(request)
+
+        def commit() -> dict[str, Any]:
+            with manager.mutation():
+                filename = _template_name(uploaded_name)
+                image = _decode_image(content)
+                path = store.template_dir / filename
+                _write_atomic(path, content)
+                config = _load_config(store)
+                return _template_record(path, image, template_references(config.presets, filename))
+
+        return await run_in_threadpool(commit)
 
     @application.post("/api/templates/capture")
     def capture_template(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-        _mutable(manager)
-        name = _template_name(str(payload.get("name", "")), default_extension=True)
-        threshold = _threshold(payload)
-        screen = _device_image(injected_device)
-        cropped = _rect_crop(screen, payload.get("rect"))
-        content = _encode_image(cropped, Path(name).suffix.lower())
-        path = store.template_dir / name
-        _write_atomic(path, content)
-        config = _load_config(store)
-        record = _template_record(path, cropped, template_references(config.presets, name))
-        record["threshold"] = threshold
-        return record
+        with manager.mutation():
+            name = _template_name(str(payload.get("name", "")), default_extension=True)
+            threshold = _threshold(payload)
+            screen = _device_image(injected_device)
+            cropped = _rect_crop(screen, payload.get("rect"))
+            content = _encode_image(cropped, Path(name).suffix.lower())
+            path = store.template_dir / name
+            _write_atomic(path, content)
+            config = _load_config(store)
+            record = _template_record(path, cropped, template_references(config.presets, name))
+            record["threshold"] = threshold
+            return record
 
     @application.post("/api/templates/{name}/recapture")
     def recapture_template(
         name: str, payload: dict[str, Any] = Body(...)
     ) -> dict[str, Any]:
-        _mutable(manager)
-        name = _template_name(name)
-        threshold = _threshold(payload)
-        path = store.template_dir / name
-        if not path.exists():
-            raise _detail(404, "找不到模板图片")
-        screen = _device_image(injected_device)
-        cropped = _rect_crop(screen, payload.get("rect"))
-        content = _encode_image(cropped, path.suffix.lower())
-        _write_atomic(path, content)
-        config = _load_config(store)
-        height, width = screen.shape[:2]
-        updated = update_template_reference_resolutions(
-            config.presets, name, (int(width), int(height))
-        )
-        store.save(config)
-        record = _template_record(path, cropped, template_references(config.presets, name))
-        record.update({"threshold": threshold, "updated_references": updated})
-        return record
+        with manager.mutation():
+            name = _template_name(name)
+            threshold = _threshold(payload)
+            path = store.template_dir / name
+            if not path.exists():
+                raise _detail(404, "找不到模板图片")
+            screen = _device_image(injected_device)
+            cropped = _rect_crop(screen, payload.get("rect"))
+            content = _encode_image(cropped, path.suffix.lower())
+            _write_atomic(path, content)
+            config = _load_config(store)
+            height, width = screen.shape[:2]
+            updated = update_template_reference_resolutions(
+                config.presets, name, (int(width), int(height))
+            )
+            store.save(config)
+            record = _template_record(path, cropped, template_references(config.presets, name))
+            record.update({"threshold": threshold, "updated_references": updated})
+            return record
 
     @application.delete("/api/templates/{name}")
     def delete_template(name: str) -> dict[str, Any]:
-        _mutable(manager)
-        name = _template_name(name)
-        path = store.template_dir / name
-        config = _load_config(store)
-        references = template_references(config.presets, name)
-        try:
-            path.unlink()
-        except FileNotFoundError as exc:
-            raise _detail(404, "找不到模板图片") from exc
-        except OSError as exc:
-            raise _detail(400, f"无法删除模板：{exc}") from exc
-        return {"deleted": name, "references": references}
+        with manager.mutation():
+            name = _template_name(name)
+            path = store.template_dir / name
+            config = _load_config(store)
+            references = template_references(config.presets, name)
+            try:
+                path.unlink()
+            except FileNotFoundError as exc:
+                raise _detail(404, "找不到模板图片") from exc
+            except OSError as exc:
+                raise _detail(400, f"无法删除模板：{exc}") from exc
+            return {"deleted": name, "references": references}
 
     @application.get("/api/archive/export")
     def archive_export(preset_id: str = Query(...)) -> Response:
-        _mutable(manager)
-        config = _load_config(store)
-        preset = next((item for item in config.presets if item.id == preset_id), None)
-        if preset is None:
-            raise _detail(404, "找不到预设")
-        with TemporaryDirectory() as directory:
-            destination = Path(directory) / "preset.adb-preset.zip"
-            try:
-                export_preset(preset, store.template_dir, destination)
-                content = destination.read_bytes()
-            except PresetArchiveError as exc:
-                raise _detail(400, str(exc)) from exc
-        filename = f"{_safe_archive_name(preset.name)}.adb-preset.zip"
-        disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
-        return Response(
-            content,
-            media_type="application/zip",
-            headers={"Content-Disposition": disposition},
-        )
+        with manager.mutation():
+            config = _load_config(store)
+            preset = next((item for item in config.presets if item.id == preset_id), None)
+            if preset is None:
+                raise _detail(404, "找不到预设")
+            with TemporaryDirectory() as directory:
+                destination = Path(directory) / "preset.adb-preset.zip"
+                try:
+                    export_preset(preset, store.template_dir, destination)
+                    content = destination.read_bytes()
+                except PresetArchiveError as exc:
+                    raise _detail(400, str(exc)) from exc
+            filename = f"{_safe_archive_name(preset.name)}.adb-preset.zip"
+            disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
+            return Response(
+                content,
+                media_type="application/zip",
+                headers={"Content-Disposition": disposition},
+            )
 
     @application.post("/api/archive/import")
     async def archive_import(request: Request) -> dict[str, Any]:
-        _mutable(manager)
         filename, content = await _uploaded_file(request, ("file", "archive"))
-        if not filename.lower().endswith(".zip"):
-            raise _detail(400, "预设包必须是 ZIP 文件")
-        try:
-            resolution = injected_device.screen_resolution()
-        except DeviceError as exc:
-            raise _detail(503, str(exc)) from exc
-        with TemporaryDirectory() as directory:
-            source = Path(directory) / "preset.zip"
-            source.write_bytes(content)
-            try:
-                preset = import_preset(source, store.template_dir, resolution)
-            except PresetArchiveError as exc:
-                raise _detail(400, str(exc)) from exc
-        config = _load_config(store)
-        preset.name = imported_preset_name(
-            preset.name, [item.name for item in config.presets]
-        )
-        config.presets.append(preset)
-        config.selected_preset_id = preset.id
-        try:
-            validate_config(config, registry=registry)
-            store.save(config)
-        except (ValidationError, ConfigError) as exc:
-            raise _detail(400, str(exc)) from exc
-        return {
-            "preset": preset.to_dict(),
-            "selected_preset_id": preset.id,
-            "resolution": {"width": resolution[0], "height": resolution[1]},
-        }
+
+        def commit() -> dict[str, Any]:
+            with manager.mutation():
+                if not filename.lower().endswith(".zip"):
+                    raise _detail(400, "预设包必须是 ZIP 文件")
+                try:
+                    resolution = (injected_device.screen_resolution(refresh=True)
+                                  if isinstance(injected_device, AdbClient)
+                                  else injected_device.screen_resolution())
+                except DeviceError as exc:
+                    raise _detail(503, str(exc)) from exc
+                with TemporaryDirectory() as directory:
+                    source = Path(directory) / "preset.zip"
+                    source.write_bytes(content)
+                    try:
+                        preset = import_preset(source, store.template_dir, resolution)
+                    except PresetArchiveError as exc:
+                        raise _detail(400, str(exc)) from exc
+                config = _load_config(store)
+                preset.name = imported_preset_name(
+                    preset.name, [item.name for item in config.presets]
+                )
+                config.presets.append(preset)
+                config.selected_preset_id = preset.id
+                try:
+                    validate_config(config, registry=registry)
+                    store.save(config)
+                except (ValidationError, ConfigError) as exc:
+                    raise _detail(400, str(exc)) from exc
+                return {
+                    "preset": preset.to_dict(),
+                    "selected_preset_id": preset.id,
+                    "resolution": {"width": resolution[0], "height": resolution[1]},
+                }
+
+        return await run_in_threadpool(commit)
 
     @application.put("/api/settings/acceleration")
     def acceleration(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-        _mutable(manager)
-        requested = str(payload.get("acceleration", payload.get("mode", ""))).strip()
-        try:
-            applied = set_acceleration(requested)
-        except ValueError as exc:
-            raise _detail(400, str(exc)) from exc
-        config = _load_config(store)
-        config.acceleration = applied
-        store.save(config)
-        return {
-            "requested": requested,
-            "applied": applied,
-            "acceleration": applied,
-            "backend": acceleration_backend(),
-            "fallback": requested != applied,
-        }
+        with manager.mutation():
+            requested = str(payload.get("acceleration", payload.get("mode", ""))).strip()
+            try:
+                applied = set_acceleration(requested)
+            except ValueError as exc:
+                raise _detail(400, str(exc)) from exc
+            config = _load_config(store)
+            config.acceleration = applied
+            store.save(config)
+            return {
+                "requested": requested,
+                "applied": applied,
+                "acceleration": applied,
+                "backend": acceleration_backend(),
+                "fallback": requested != applied,
+            }
 
     @application.post("/api/coords/scale")
     def coordinates_scale(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
@@ -664,15 +691,37 @@ def create_app(
     async def events_socket(websocket: WebSocket) -> None:
         await websocket.accept()
         backlog, queue, subscriber = await manager.subscribe()
-        try:
+        async def send_events() -> None:
             for event in backlog:
-                await websocket.send_json(event)
+                await asyncio.wait_for(websocket.send_json(event), timeout=10)
             while True:
-                await websocket.send_json(await queue.get())
-        except WebSocketDisconnect:
+                await asyncio.wait_for(websocket.send_json(await queue.get()), timeout=10)
+
+        async def receive_disconnect() -> None:
+            while True:
+                if (await websocket.receive())["type"] == "websocket.disconnect":
+                    return
+
+        tasks = [asyncio.create_task(send_events()),
+                 asyncio.create_task(receive_disconnect()),
+                 asyncio.create_task(subscriber.closed.wait())]
+        try:
+            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+            if subscriber.closed.is_set():
+                tasks[0].cancel()
+                await asyncio.gather(tasks[0], return_exceptions=True)
+                await websocket.close(code=1013, reason="事件消费过慢，请重新连接")
+        except asyncio.TimeoutError:
+            await websocket.close(code=1013, reason="事件发送超时，请重新连接")
+        except (WebSocketDisconnect, OSError):
             pass
         finally:
             manager.unsubscribe(subscriber)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     dist = (static_dir or _static_root()).resolve()
     if dist.is_dir():

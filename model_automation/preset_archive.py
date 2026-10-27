@@ -207,7 +207,30 @@ def _scale_step(step: Step, target_resolution: tuple[int, int]) -> tuple[float, 
     target_width, target_height = target_resolution
     scale_x = target_width / source_width
     scale_y = target_height / source_height
+    if step.kind == "find_and_tap":
+        roi_fields = {field.key: field for field in definition.fields
+                      if field.key.startswith("search_") or field.key == "roi_enabled"}
+        try:
+            roi = {key: field.validate(step.params.get(key, field.default))
+                   for key, field in roi_fields.items()}
+        except ValueError as exc:
+            raise PresetArchiveError(f"步骤“{step.name}”的搜索区域 ROI 无效：{exc}") from exc
+        x, y = roi["search_x"], roi["search_y"]
+        width, height = roi["search_width"], roi["search_height"]
+        if roi["roi_enabled"]:
+            if width <= 0 or height <= 0:
+                raise PresetArchiveError(f"步骤“{step.name}”的搜索区域 ROI 为空")
+            if x + width > source_width or y + height > source_height:
+                raise PresetArchiveError(f"步骤“{step.name}”的搜索区域 ROI 超出屏幕范围")
+        left, top = round(x * scale_x), round(y * scale_y)
+        right, bottom = round((x + width) * scale_x), round((y + height) * scale_y)
+        if roi["roi_enabled"] and (right <= left or bottom <= top):
+            raise PresetArchiveError(f"步骤“{step.name}”的搜索区域 ROI 缩放后为空")
+        step.params.update(search_x=left, search_y=top,
+                           search_width=right - left, search_height=bottom - top)
     for field in coordinate_fields:
+        if step.kind == "find_and_tap" and field.key.startswith("search_"):
+            continue
         try:
             value = int(step.params.get(field.key, field.default))
         except (TypeError, ValueError) as exc:

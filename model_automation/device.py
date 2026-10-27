@@ -5,6 +5,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from threading import RLock
+import time
 from typing import Sequence
 
 import cv2
@@ -25,6 +27,9 @@ class AdbClient:
         self.executable = str(bundled.resolve()) if bundled is not None else (
             shutil.which("adb") or "adb"
         )
+        self._resolution_lock = RLock()
+        self._resolution: tuple[int, int] | None = None
+        self._resolution_at = 0.0
 
     def _run(
         self,
@@ -54,27 +59,56 @@ class AdbClient:
             return stderr.decode("utf-8", errors="replace").strip()
         return str(stderr or "").strip()
 
+    def _clear_resolution(self) -> None:
+        with self._resolution_lock:
+            self._resolution = None
+            self._resolution_at = 0.0
+
     def state(self) -> str:
-        result = self._run(["get-state"])
-        if result.returncode != 0:
-            detail = self._error_text(result) or "未检测到设备"
-            raise DeviceError(detail)
-        return str(result.stdout).strip()
+        try:
+            result = self._run(["get-state"])
+            if result.returncode != 0:
+                detail = self._error_text(result) or "未检测到设备"
+                raise DeviceError(detail)
+            state = str(result.stdout).strip()
+        except DeviceError:
+            self._clear_resolution()
+            raise
+        if state != "device":
+            self._clear_resolution()
+        return state
 
     def screenshot(self) -> np.ndarray:
-        result = self._run(["exec-out", "screencap", "-p"], binary=True)
-        if result.returncode != 0:
-            raise DeviceError(self._error_text(result) or "截图失败")
-        image_data = np.frombuffer(result.stdout, dtype=np.uint8)
-        image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
-        if image is None:
-            raise DeviceError("无法解码设备截图")
+        try:
+            result = self._run(["exec-out", "screencap", "-p"], binary=True)
+            if result.returncode != 0:
+                raise DeviceError(self._error_text(result) or "截图失败")
+            image_data = np.frombuffer(result.stdout, dtype=np.uint8)
+            if image_data.size == 0:
+                raise DeviceError("设备截图为空")
+            image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+            if image is None:
+                raise DeviceError("无法解码设备截图")
+        except (DeviceError, cv2.error) as exc:
+            self._clear_resolution()
+            if isinstance(exc, DeviceError):
+                raise
+            raise DeviceError("无法解码设备截图") from exc
+        height, width = image.shape[:2]
+        with self._resolution_lock:
+            self._resolution = int(width), int(height)
+            self._resolution_at = time.monotonic()
         return image
 
-    def screen_resolution(self) -> tuple[int, int]:
-        image = self.screenshot()
-        height, width = image.shape[:2]
-        return int(width), int(height)
+    def screen_resolution(self, *, refresh: bool = False) -> tuple[int, int]:
+        # Only reuse dimensions for a short burst of health checks; recognition
+        # always captures a fresh image. Import can explicitly refresh after rotation.
+        with self._resolution_lock:
+            if not refresh and self._resolution is not None and time.monotonic() - self._resolution_at < 0.5:
+                return self._resolution
+            image = self.screenshot()
+            height, width = image.shape[:2]
+            return int(width), int(height)
 
     def tap(self, x: int, y: int) -> None:
         result = self._run(["shell", "input", "tap", str(x), str(y)])

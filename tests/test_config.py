@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
+from unittest.mock import patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -187,6 +189,36 @@ class ConfigStoreTests(unittest.TestCase):
 
             with self.assertRaises(ConfigError):
                 ConfigStore(path, root / "templates").load()
+
+    def test_concurrent_stores_initialize_once_and_save_complete_json(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            def load(_index):
+                return ConfigStore(root / "config.json", root / "templates").load()
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                configs = list(pool.map(load, range(30)))
+            self.assertEqual(1, len({config.selected_preset_id for config in configs}))
+            def save(index):
+                config = configs[index]
+                config.presets[0].name = str(index)
+                ConfigStore(root / "config.json", root / "templates").save(config)
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(save, range(30)))
+            self.assertIn(load(0).presets[0].name, {str(i) for i in range(30)})
+            self.assertEqual([], list(root.glob("*.tmp")))
+
+    def test_failed_replace_preserves_config_and_removes_temporary(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ConfigStore(root / "config.json", root / "templates")
+            config = store.load()
+            original = store.path.read_bytes()
+            config.presets[0].name = "changed"
+            with patch.object(Path, "replace", side_effect=OSError("locked")):
+                with self.assertRaises(ConfigError):
+                    store.save(config)
+            self.assertEqual(original, store.path.read_bytes())
+            self.assertEqual([], list(root.glob("*.tmp")))
 
 
 if __name__ == "__main__":

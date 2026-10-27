@@ -434,5 +434,50 @@ class PresetArchiveTests(unittest.TestCase):
                 import_preset(archive, root / "templates", (100, 200))
 
 
+class RoiScalingTests(unittest.TestCase):
+    def recognition(self, bounds, resolution=(100, 200)):
+        x, y, width, height = bounds
+        return Step(name="roi", kind="find_and_tap", screen_resolution=resolution, params={
+            "templates": [{"file": "target.png"}], "roi_enabled": True,
+            "search_x": x, "search_y": y, "search_width": width, "search_height": height})
+
+    def bounds(self, step):
+        return tuple(step.params[key] for key in
+                     ("search_x", "search_y", "search_width", "search_height"))
+
+    def test_full_screen_roi_keeps_exclusive_right_bottom_edges(self):
+        source = self.recognition((0, 0, 100, 200))
+        self.assertEqual((0, 0, 200, 600), self.bounds(scale_step(source, (200, 600))))
+        self.assertEqual((0, 0, 100, 200), self.bounds(source))
+
+    def test_roi_scales_boundaries_together_for_rounding_and_nested_branches(self):
+        source = self.recognition((1, 1, 1, 1), (7, 7))
+        nested = self.recognition((3, 3, 4, 4), (7, 7))
+        source.params["branches"] = {"0": [nested.to_dict()]}
+        scaled = scale_step(source, (10, 10))
+        self.assertEqual((1, 1, 2, 2), self.bounds(scaled))
+        branch = Step.from_dict(scaled.params["branches"]["0"][0])
+        self.assertEqual((4, 4, 6, 6), self.bounds(branch))
+
+    def test_invalid_and_empty_after_scaling_roi_are_rejected(self):
+        for bounds in ((-1, 0, 10, 10), (0, 0, 0, 10), (90, 0, 11, 10)):
+            with self.subTest(bounds=bounds), self.assertRaisesRegex(PresetArchiveError, "ROI"):
+                scale_step(self.recognition(bounds), (200, 400))
+        with self.assertRaisesRegex(PresetArchiveError, "缩放后为空"):
+            scale_step(self.recognition((0, 0, 1, 1)), (1, 1))
+
+    def test_archive_import_scales_roi_and_template_together(self):
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            write_image(folder / "target.png", width=10, height=10)
+            step = self.recognition((80, 170, 20, 30))
+            archive = folder / "preset.zip"
+            export_preset(Preset(name="roi", steps=[step]), folder, archive)
+            imported = import_preset(archive, folder / "imported", (200, 600))
+            self.assertEqual((160, 510, 40, 90), self.bounds(imported.steps[0]))
+            filename = imported.steps[0].params["templates"][0]["file"]
+            self.assertEqual((30, 20), cv2.imread(str(folder / "imported" / filename)).shape[:2])
+
+
 if __name__ == "__main__":
     unittest.main()
