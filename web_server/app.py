@@ -3,6 +3,7 @@ from __future__ import annotations
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from pathlib import Path
+from queue import Empty
 import sys
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -11,7 +12,7 @@ from urllib.parse import quote
 import cv2
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 import numpy as np
 
 from model_automation.config import ConfigError, ConfigStore, PROJECT_ROOT
@@ -40,6 +41,7 @@ from model_automation.steps import REGISTRY, step_definitions
 from model_automation.vision import acceleration_backend, load_image, set_acceleration
 
 from .runtime import RuntimeConflict, RuntimeManager
+from .screencast import ScreencastError, ScrcpyScreencast
 
 
 MAX_UPLOAD_SIZE = 200 * 1024 * 1024
@@ -50,6 +52,12 @@ def _static_root() -> Path:
     if bundled_root:
         return Path(bundled_root) / "web" / "dist"
     return PROJECT_ROOT / "web" / "dist"
+
+
+def _scrcpy_server_path() -> Path:
+    bundled_root = getattr(sys, "_MEIPASS", None)
+    root = Path(bundled_root) if bundled_root else PROJECT_ROOT
+    return root / "vendor" / "scrcpy-server-v5.0.1"
 
 
 def _detail(status_code: int, message: str) -> HTTPException:
@@ -219,6 +227,7 @@ def create_app(
     runtime: RuntimeManager | None = None,
     static_dir: Path | None = None,
     adb: Any | None = None,
+    screencast: Any | None = None,
 ) -> FastAPI:
     store = config_store or (runtime.config_store if runtime is not None else ConfigStore())
     if device is not None and adb is not None:
@@ -232,10 +241,23 @@ def create_app(
     else:
         injected_device = AdbClient(PROJECT_ROOT)
     manager = runtime or RuntimeManager(store, injected_device, registry=registry)
+    screencast_manager = screencast
+    if screencast_manager is None:
+        adb_executable = getattr(injected_device, "executable", None)
+        if adb_executable:
+            screencast_manager = ScrcpyScreencast(
+                adb_executable,
+                _scrcpy_server_path(),
+            )
     application = FastAPI(title="ADB Automation Web API")
     application.state.config_store = store
     application.state.device = injected_device
     application.state.runtime = manager
+    application.state.screencast = screencast_manager
+    if screencast_manager is not None:
+        close_screencast = getattr(screencast_manager, "close", None)
+        if close_screencast is not None:
+            application.router.add_event_handler("shutdown", close_screencast)
 
     @application.exception_handler(RequestValidationError)
     async def request_validation_error(
@@ -299,11 +321,69 @@ def create_app(
             scale = max_width / image.shape[1]
             height = max(1, int(round(image.shape[0] * scale)))
             image = cv2.resize(image, (max_width, height), interpolation=cv2.INTER_AREA)
+        headers = {"Cache-Control": "no-store"}
         if image_format.lower() in {"jpg", "jpeg"}:
-            return Response(_encode_image(image, ".jpg"), media_type="image/jpeg")
+            return Response(
+                _encode_image(image, ".jpg"),
+                media_type="image/jpeg",
+                headers=headers,
+            )
         if image_format.lower() != "png":
             raise _detail(400, "截图格式仅支持 png 或 jpeg")
-        return Response(_encode_image(image, ".png"), media_type="image/png")
+        return Response(
+            _encode_image(image, ".png"), media_type="image/png", headers=headers
+        )
+
+    @application.get("/api/device/stream/status")
+    def device_stream_status() -> dict[str, Any]:
+        if screencast_manager is None:
+            return {
+                "state": "unavailable",
+                "message": "当前设备不支持实时投屏",
+                "codec": None,
+                "width": 0,
+                "height": 0,
+                "fps": 0,
+                "subscribers": 0,
+            }
+        return screencast_manager.status()
+
+    @application.get("/api/device/stream")
+    def device_stream() -> StreamingResponse:
+        if screencast_manager is None:
+            raise _detail(503, "当前设备不支持实时投屏")
+        try:
+            subscriber = screencast_manager.subscribe()
+        except ScreencastError as exc:
+            raise _detail(503, str(exc)) from exc
+
+        def frames():
+            try:
+                while True:
+                    try:
+                        frame = subscriber.frames.get(timeout=1)
+                    except Empty:
+                        state = screencast_manager.status().get("state")
+                        if state in {"error", "idle"}:
+                            break
+                        continue
+                    if frame is None:
+                        break
+                    screencast_manager.touch(subscriber)
+                    yield len(frame).to_bytes(4, "big") + frame
+            finally:
+                screencast_manager.unsubscribe(subscriber)
+
+        return StreamingResponse(
+            frames(),
+            media_type="application/octet-stream",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-Stream-Format": "jpeg-length-prefixed",
+            },
+        )
 
     @application.get("/api/config")
     def get_config() -> dict[str, Any]:

@@ -6,6 +6,7 @@ export const useUiStore = defineStore('ui', {
     selectedNodeIds: [],
     selectedEdgeId: null,
     templateDrawerOpen: false,
+    deviceMonitorOpen: false,
     paletteCollapsed: false,
     propertiesCollapsed: false,
     logCollapsed: false,

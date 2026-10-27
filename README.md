@@ -11,6 +11,7 @@ A Windows desktop automation tool for Android devices. It uses ADB to capture de
 - Coordinate taps, repeated taps, swipes, waits, nested preset execution, and loop control.
 - Screenshot-based coordinate and swipe selection. Selections are converted back to the device's original pixel coordinates.
 - Live run status, per-step results, logs, and device connection checks.
+- Low-latency H.264 screen mirroring in a floating window. The monitor can be freely moved, resized, and hidden while you work, and its position and size are remembered.
 - User configuration and image templates stored beside the application for easy backup.
 
 ## Requirements
@@ -23,6 +24,8 @@ For a source checkout on Windows:
 - An Android device with USB debugging enabled and authorized for this computer.
 
 The project includes `adb.exe` and its Windows support DLLs at the repository root. The application uses this bundled ADB first and falls back to `adb` on `PATH` if the bundled executable is unavailable. The target computer may also need the device manufacturer's USB driver.
+
+The live monitor uses a bundled, unmodified [scrcpy](https://github.com/Genymobile/scrcpy) server (`vendor/scrcpy-server-v5.0.1`, Apache License 2.0) and decodes its H.264 stream with PyAV. No separate scrcpy installation is required; see `vendor/README.md` for the source and checksum.
 
 ## Install and run from source
 
@@ -87,6 +90,7 @@ Stop either process with `Ctrl+C`.
 6. Connect steps on the canvas to express prerequisites. A step is skipped in a cycle if a prerequisite was disabled, skipped, or failed with continuation enabled.
 7. Set the preset loop count: `1` runs once; `0` repeats until a failure or a manual stop. Use **Run** to start and the stop control to interrupt execution.
 8. Follow per-node states and the log panel to diagnose a run. Use the canvas fit, zoom, lock, and layout controls to navigate the workflow.
+9. Click the smartphone icon in the top toolbar to open the floating live device monitor. It streams the device display as low-latency H.264 at up to 30 FPS. Drag its title bar to move it, drag the bottom-right corner to resize it, and click the eye button to hide it. The stream stops when hidden or when the page is in the background, and the window remembers its last position and size.
 
 ## Data and backups
 

@@ -11,7 +11,10 @@ a = Analysis(
         ("AdbWinApi.dll", "."),
         ("AdbWinUsbApi.dll", "."),
     ],
-    datas=[("web/dist", "web/dist")],
+    datas=[
+        ("web/dist", "web/dist"),
+        ("vendor/scrcpy-server-v5.0.1", "vendor"),
+    ],
     hiddenimports=(
         collect_submodules("fastapi")
         + collect_submodules("uvicorn")

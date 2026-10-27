@@ -1,4 +1,5 @@
 from pathlib import Path
+from queue import Queue
 from tempfile import TemporaryDirectory
 import time
 import unittest
@@ -44,6 +45,35 @@ def png_bytes(image: np.ndarray) -> bytes:
     if not success:
         raise RuntimeError("test image encoding failed")
     return encoded.tobytes()
+
+
+class FakeSubscriber:
+    def __init__(self, frames: list[bytes | None]) -> None:
+        self.frames = Queue()
+        for frame in frames:
+            self.frames.put(frame)
+
+
+class FakeScreencast:
+    def __init__(self) -> None:
+        self.subscriber = FakeSubscriber([b"first", b"second", None])
+        self.touched = 0
+        self.closed = False
+
+    def subscribe(self) -> FakeSubscriber:
+        return self.subscriber
+
+    def touch(self, _subscriber: FakeSubscriber) -> None:
+        self.touched += 1
+
+    def unsubscribe(self, _subscriber: FakeSubscriber) -> None:
+        pass
+
+    def status(self) -> dict[str, object]:
+        return {"state": "streaming", "message": "", "fps": 30, "subscribers": 1}
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class WebApiTests(unittest.TestCase):
@@ -130,8 +160,19 @@ class WebApiTests(unittest.TestCase):
 
         screenshot = self.client.get("/api/device/screenshot?max_width=50")
         self.assertEqual("image/png", screenshot.headers["content-type"])
+        self.assertEqual("no-store", screenshot.headers["cache-control"])
         decoded = cv2.imdecode(np.frombuffer(screenshot.content, np.uint8), cv2.IMREAD_COLOR)
         self.assertEqual((30, 50), decoded.shape[:2])
+
+        live_frame = self.client.get(
+            "/api/device/screenshot?max_width=25&format=jpeg"
+        )
+        self.assertEqual("image/jpeg", live_frame.headers["content-type"])
+        self.assertEqual("no-store", live_frame.headers["cache-control"])
+        live_decoded = cv2.imdecode(
+            np.frombuffer(live_frame.content, np.uint8), cv2.IMREAD_COLOR
+        )
+        self.assertEqual((15, 25), live_decoded.shape[:2])
 
         image = np.full((8, 12, 3), 90, dtype=np.uint8)
         uploaded = self.client.post(
@@ -172,6 +213,36 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(
             200, self.client.delete("/api/templates/target.png").status_code
         )
+
+    def test_stream_endpoints_report_unavailable_for_injected_devices(self) -> None:
+        status = self.client.get("/api/device/stream/status")
+        self.assertEqual(200, status.status_code)
+        self.assertEqual("unavailable", status.json()["state"])
+
+        stream = self.client.get("/api/device/stream")
+        self.assertEqual(503, stream.status_code)
+        self.assertEqual("当前设备不支持实时投屏", stream.json()["detail"])
+
+    def test_stream_endpoint_emits_length_prefixed_jpeg_frames(self) -> None:
+        fake = FakeScreencast()
+        with TestClient(
+            create_app(
+                config_store=self.store,
+                device=self.device,
+                screencast=fake,
+            )
+        ) as client:
+            response = client.get("/api/device/stream")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            b"\x00\x00\x00\x05first\x00\x00\x00\x06second",
+            response.content,
+        )
+        self.assertEqual("application/octet-stream", response.headers["content-type"])
+        self.assertEqual("jpeg-length-prefixed", response.headers["x-stream-format"])
+        self.assertGreaterEqual(fake.touched, 2)
+        self.assertTrue(fake.closed)
 
     def test_coordinate_scaling_and_archive_roundtrip(self) -> None:
         step = Step(

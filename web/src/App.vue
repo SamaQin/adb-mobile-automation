@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AlertTriangle, RefreshCw, WifiOff, X } from 'lucide-vue-next'
+import DeviceMonitor from './components/DeviceMonitor.vue'
 import FlowCanvas from './components/FlowCanvas.vue'
 import LogPanel from './components/editors/LogPanel.vue'
 import PresetToolbar from './components/editors/PresetToolbar.vue'
@@ -140,6 +141,7 @@ onBeforeUnmount(() => {
       </div>
     </template>
 
+    <DeviceMonitor v-if="ready && uiStore.deviceMonitorOpen" @hide="uiStore.deviceMonitorOpen = false" />
     <TemplateManager v-if="uiStore.templateDrawerOpen" @close="uiStore.templateDrawerOpen = false" />
     <ScreenshotEditor v-if="uiStore.screenshotRequest" :request="uiStore.screenshotRequest" @close="uiStore.closeScreenshot($event)" />
 

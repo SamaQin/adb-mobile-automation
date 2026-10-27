@@ -13,6 +13,7 @@ import {
   Play,
   Redo2,
   Save,
+  Smartphone,
   Square,
   Trash2,
   Undo2,
@@ -131,6 +132,13 @@ function changeAcceleration(event) {
       <span><strong>{{ deviceStore.connected ? 'ADB 已连接' : 'ADB 未连接' }}</strong><small v-if="deviceStore.resolution">{{ deviceStore.resolution.width }}×{{ deviceStore.resolution.height }}</small><small v-else>{{ deviceStore.state }}</small></span>
       <button class="icon-button" title="检查设备" :disabled="deviceStore.checking" @click="safe(() => deviceStore.check())"><MonitorCheck :size="16" /></button>
     </div>
+    <button
+      class="icon-button monitor-toggle"
+      :class="{ active: uiStore.deviceMonitorOpen }"
+      :title="uiStore.deviceMonitorOpen ? '隐藏手机实时画面' : '显示手机实时画面'"
+      :aria-pressed="uiStore.deviceMonitorOpen"
+      @click="uiStore.deviceMonitorOpen = !uiStore.deviceMonitorOpen"
+    ><Smartphone :size="16" /></button>
 
     <div class="toolbar-separator" />
     <label class="preset-select"><span>预设</span><select :value="configStore.selectedPreset?.id" :disabled="runStore.running || configStore.saving" @change="switchPreset"><option v-for="preset in configStore.presets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select></label>

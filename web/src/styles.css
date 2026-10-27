@@ -227,8 +227,10 @@ input[type="range"] {
 
 .preset-select > span,
 .compact-control > span {
+  flex: none;
   color: var(--muted);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .preset-select select {
@@ -287,6 +289,17 @@ input[type="range"] {
 .toolbar-spacer {
   min-width: 2px;
   flex: 1 1 auto;
+}
+
+.monitor-toggle {
+  flex: none;
+  color: var(--muted);
+}
+
+.monitor-toggle.active {
+  border-color: rgba(56, 189, 248, 0.34);
+  background: rgba(56, 189, 248, 0.13);
+  color: var(--cyan);
 }
 
 .readonly-toggle {
@@ -1704,6 +1717,295 @@ input[type="range"] {
   gap: 7px;
   padding: 8px 12px;
   border-top: 1px solid var(--line);
+}
+
+.device-monitor {
+  position: fixed;
+  z-index: 90;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-color: rgba(56, 189, 248, 0.3);
+  background: rgba(8, 15, 23, 0.96);
+  box-shadow:
+    0 20px 52px rgba(0, 0, 0, 0.56),
+    0 0 0 1px rgba(56, 189, 248, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.device-monitor-titlebar {
+  display: flex;
+  height: 40px;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  padding: 0 4px 0 9px;
+  border-bottom: 1px solid rgba(56, 189, 248, 0.16);
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.1), rgba(56, 189, 248, 0.018) 62%, transparent);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.device-monitor-titlebar:active {
+  cursor: grabbing;
+}
+
+.device-monitor-titlebar > svg {
+  flex: none;
+  color: var(--cyan);
+}
+
+.monitor-heading {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  line-height: 1.18;
+}
+
+.monitor-heading strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-heading small {
+  overflow: hidden;
+  color: var(--muted);
+  font: 8px ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-live {
+  display: inline-flex;
+  height: 18px;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 0 5px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--dim);
+  font: 7px ui-monospace, SFMono-Regular, Consolas, monospace;
+  letter-spacing: 0.08em;
+}
+
+.monitor-live i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.monitor-live.live {
+  border-color: rgba(52, 211, 153, 0.24);
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--green);
+}
+
+.monitor-live.live i {
+  box-shadow: 0 0 7px rgba(52, 211, 153, 0.75);
+  animation: radio-pulse 1.2s ease-in-out infinite;
+}
+
+.monitor-live.paused {
+  color: var(--amber);
+}
+
+.monitor-actions {
+  display: flex;
+  flex: none;
+  gap: 1px;
+}
+
+.device-monitor-titlebar .monitor-actions button {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.device-monitor-titlebar .monitor-actions button:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--control-hover);
+  color: var(--text);
+}
+
+.device-monitor-stage {
+  position: relative;
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  place-items: center;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 18%, rgba(56, 189, 248, 0.07), transparent 54%),
+    #03070c;
+}
+
+.device-monitor-stage::after {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  box-shadow: inset 0 0 34px rgba(0, 0, 0, 0.44);
+  content: "";
+  pointer-events: none;
+}
+
+.monitor-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  background: #020509;
+  user-select: none;
+}
+
+.monitor-state {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 18px;
+  background: rgba(4, 10, 16, 0.9);
+  color: var(--muted);
+  text-align: center;
+}
+
+.monitor-state > svg {
+  color: var(--cyan);
+  opacity: 0.85;
+}
+
+.monitor-state.error > svg {
+  color: var(--red);
+}
+
+.monitor-state strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.monitor-state span {
+  max-width: 220px;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.monitor-state button {
+  height: 27px;
+  min-height: 27px;
+  margin-top: 3px;
+  padding: 3px 9px;
+  font-size: 10px;
+}
+
+.device-monitor-footer {
+  display: flex;
+  height: 26px;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 22px 0 9px;
+  overflow: hidden;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--dim);
+  font: 8px ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: nowrap;
+}
+
+.device-monitor-footer > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.device-monitor-footer > span:last-child {
+  flex: none;
+  color: var(--muted);
+}
+
+.monitor-status-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--dim);
+  vertical-align: 1px;
+}
+
+.monitor-status-dot.live {
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+}
+
+.monitor-status-dot.error {
+  background: var(--red);
+}
+
+.monitor-resize-handle {
+  position: absolute;
+  z-index: 4;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background:
+    linear-gradient(135deg, transparent 0 52%, rgba(154, 169, 184, 0.5) 52% 59%, transparent 59% 67%, rgba(154, 169, 184, 0.65) 67% 74%, transparent 74%);
+  cursor: nwse-resize;
+  opacity: 0.72;
+  touch-action: none;
+}
+
+.device-monitor-titlebar .monitor-actions button:focus-visible,
+.monitor-resize-handle:focus-visible {
+  outline-offset: -2px;
+}
+
+.monitor-resize-handle:hover:not(:disabled) {
+  border: 0;
+  background:
+    linear-gradient(135deg, transparent 0 52%, rgba(200, 221, 235, 0.72) 52% 59%, transparent 59% 67%, rgba(200, 221, 235, 0.88) 67% 74%, transparent 74%);
+  opacity: 1;
+}
+
+.monitor-resize-handle:active:not(:disabled) {
+  transform: none;
+}
+
+body.monitor-dragging,
+body.monitor-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+body.monitor-resizing,
+body.monitor-resizing * {
+  cursor: nwse-resize !important;
+  user-select: none !important;
 }
 
 .toast {
