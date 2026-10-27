@@ -38,7 +38,7 @@ const style = computed(() => ({
   width: `${geometry.value.width}px`,
   height: `${geometry.value.height}px`,
 }))
-const streaming = computed(() => deviceStore.connected && pageVisible.value)
+const streaming = computed(() => deviceStore.connected && pageVisible.value && !deviceStore.operationBusy)
 const isLive = computed(() => streaming.value && streamLive.value)
 const resolutionLabel = computed(() => deviceStore.resolution
   ? `${deviceStore.resolution.width} × ${deviceStore.resolution.height}`

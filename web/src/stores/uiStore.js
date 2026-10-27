@@ -9,6 +9,7 @@ export const useUiStore = defineStore('ui', {
     selectedEdgeId: null,
     templateDrawerOpen: false,
     deviceMonitorOpen: false,
+    wirelessDeviceOpen: false,
     paletteCollapsed: false,
     propertiesCollapsed: false,
     logCollapsed: false,

@@ -255,6 +255,9 @@ def create_app(
                 adb_executable,
                 _scrcpy_server_path(),
             )
+            selected_serial = getattr(injected_device, "selected_serial", None)
+            if selected_serial is not None:
+                screencast_manager.set_device(selected_serial)
     assets = TemplateAssets()
     application = FastAPI(title="ADB Automation Web API")
     application.state.config_store = store
@@ -292,12 +295,16 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    def device_metadata() -> dict[str, Any]:
+        serial = getattr(injected_device, "selected_serial", None)
+        return {"serial": serial, "selected_serial": serial, "transport": AdbClient._transport(serial) if serial else None}
+
     @application.get("/api/device/state")
     def device_state() -> dict[str, Any]:
         try:
             state = injected_device.state()
             if state != "device":
-                result = {"connected": False, "state": state, "resolution": None}
+                result = {"connected": False, "state": state, "resolution": None, **device_metadata()}
                 manager.publish_device(result)
                 return {**result, "device": result}
             width, height = injected_device.screen_resolution()
@@ -305,6 +312,7 @@ def create_app(
                 "connected": True,
                 "state": state,
                 "resolution": {"width": width, "height": height},
+                **device_metadata(),
             }
             manager.publish_device(result)
             return {**result, "device": result}
@@ -314,9 +322,66 @@ def create_app(
                 "state": "unavailable",
                 "resolution": None,
                 "error": str(exc),
+                **device_metadata(),
             }
             manager.publish_device(result)
             return {**result, "device": result}
+
+    def device_method(name: str):
+        action = getattr(injected_device, name, None)
+        if not callable(action):
+            raise HTTPException(status_code=400, detail="当前设备接口不支持无线管理")
+        return action
+
+    def device_catalog() -> dict[str, Any]:
+        return {"devices": device_method("list_devices")(), "selected_serial": getattr(injected_device, "selected_serial", None)}
+
+    def sync_screencast_device() -> None:
+        if screencast_manager is not None:
+            action = getattr(screencast_manager, "set_device", None)
+            if callable(action):
+                action(getattr(injected_device, "selected_serial", None))
+
+    def device_action(name: str, *args: Any) -> dict[str, Any]:
+        with manager.mutation():
+            result = device_method(name)(*args)
+            if name != "pair_wireless":
+                sync_screencast_device()
+            # A successful connection is not rolled back if screenshot/size fails.
+            # Return the actual health state so the UI can explain that separately.
+            return {**result, "device": device_state()["device"], **device_catalog()}
+
+    @application.get("/api/device/devices")
+    def device_devices() -> dict[str, Any]:
+        return device_catalog()
+
+    @application.post("/api/device/connect")
+    def device_connect(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return device_action("connect_wireless", payload.get("host"), payload.get("port", 5555))
+
+    @application.post("/api/device/pair")
+    def device_pair(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return device_action("pair_wireless", payload.get("host"), payload.get("port"), payload.get("code"))
+
+    @application.post("/api/device/select")
+    def device_select(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        with manager.mutation():
+            device_method("select_device")(payload.get("serial"))
+            sync_screencast_device()
+            return {"message": "已切换当前设备", "device": device_state()["device"], **device_catalog()}
+
+    @application.post("/api/device/disconnect")
+    def device_disconnect(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        return device_action("disconnect_wireless", payload.get("serial"))
+
+    @application.post("/api/device/tcpip")
+    def device_tcpip(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        with manager.mutation():
+            if screencast_manager is not None:
+                screencast_manager.close()
+            result = device_method("enable_wireless")(payload.get("port", 5555))
+            sync_screencast_device()
+            return {**result, "device": device_state()["device"], **device_catalog()}
 
     @application.get("/api/device/screenshot")
     def device_screenshot(

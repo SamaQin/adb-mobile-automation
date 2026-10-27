@@ -24,6 +24,7 @@
 - Logs are immutable rows in replaced raw arrays. Append through runStore actions so deduplication, limits and UI notifications stay correct. Keep scroll following at the tail and preserve the user's historical row anchor.
 - History stores only serialized snapshots, with a shared 16 MiB/50-entry undo+redo budget; one oversized nearest snapshot is retained as an exception. Batch copy/delete must remap all selected root subtrees in one transaction. Template catalogs coalesce requests, invalidate after writes/import, and render bounded pages.
 - Device dimensions may be reused for only 0.5 seconds to coalesce health checks. Screenshots are always fresh; resolution-sensitive imports force a dimension refresh, and disconnect/errors invalidate the cache.
+- Wireless connection/pairing/selection/disconnect/TCP-IP enable operations use the runtime mutation gate. Device input and a scrcpy session must stay pinned to the same selected serial; a disconnected explicit target must never fall back to another device. Validate IP/port and pass pairing codes via stdin without persisting or echoing them. Legacy TCP/IP enable requires one authorized USB target and does not automatically connect.
 - Multi-node movement commits all final positions once. Batch edits record one undo entry. Config and loaded layout state are restored together; saving advances the saved baseline without clearing history. Save responses must not overwrite newer edits.
 - Screenshot editors display scaled images but persist original device pixel coordinates.
 

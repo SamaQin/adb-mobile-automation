@@ -16,6 +16,7 @@ import av
 import cv2
 
 LOGGER = logging.getLogger(__name__)
+_CURRENT_DEVICE = object()
 
 SCRCPY_VERSION = "5.0.1"
 SCRCPY_REMOTE_PATH = "/data/local/tmp/adb-automation-scrcpy-5.0.1.jar"
@@ -208,6 +209,12 @@ class ScrcpyScreencast:
         self.video_bit_rate = int(video_bit_rate)
         self.idle_timeout = idle_timeout
         self._lock = RLock()
+        self._device_change_lock = RLock()
+        self._device_ready = Event()
+        self._device_ready.set()
+        self._switching_device = False
+        self._serial: str | None = None
+        self._stream_serial: str | None = None
         self._subscribers: dict[int, FrameSubscriber] = {}
         self._next_subscriber = 1
         self._socket: socket.socket | None = None
@@ -235,6 +242,31 @@ class ScrcpyScreencast:
         self._device_name = ""
         self._log_lines: deque[str] = deque(maxlen=40)
 
+    def set_device(self, serial: str | None) -> None:
+        """Close the old stream atomically before future subscribers use serial."""
+        if serial is not None and (not isinstance(serial, str) or not serial or serial.startswith("-") or any(char.isspace() for char in serial)):
+            raise ScreencastError("投屏设备序列号无效")
+        with self._device_change_lock:
+            with self._lock:
+                if self._serial == serial:
+                    return
+                self._switching_device = True
+                self._device_ready.clear()
+            try:
+                # A reader failure may already be releasing this stream. Its
+                # cleanup must finish before the selected serial can change.
+                self._cleanup_done.wait()
+                self.close()
+                self._cleanup_done.wait()
+                with self._lock:
+                    self._serial = serial
+                    self._device_name = ""
+                    self._width = self._height = 0
+            finally:
+                with self._lock:
+                    self._switching_device = False
+                    self._device_ready.set()
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -253,9 +285,10 @@ class ScrcpyScreencast:
         if codec not in {"jpeg", "h264"}:
             raise ScreencastError(f"不支持的投屏编码：{codec}")
         while True:
+            self._device_ready.wait(timeout=5)
             self._cleanup_done.wait(timeout=5)
             with self._lock:
-                if self._closing:
+                if self._closing or self._switching_device:
                     continue
                 self._cancel_idle_timer_locked()
                 if self._reader_thread is None or not self._reader_thread.is_alive():
@@ -325,6 +358,7 @@ class ScrcpyScreencast:
             connection = self._socket
             process = self._process
             port = self._port
+            serial = self._stream_serial
             reader = self._reader_thread
             self._socket = None
             self._process = None
@@ -342,13 +376,15 @@ class ScrcpyScreencast:
         try:
             for subscriber in subscribers:
                 self._offer(subscriber, None)
-            self._release(connection, process, port, reader)
+            self._release(connection, process, port, reader, serial=serial)
         finally:
             with self._lock:
                 self._closing = False
                 self._cleanup_done.set()
 
     def _start_locked(self) -> None:
+        self._stream_serial = self._serial
+        serial = self._stream_serial
         self._state = "starting"
         self._message = ""
         self._width = 0
@@ -367,6 +403,7 @@ class ScrcpyScreencast:
         port: int | None = None
         try:
             self._push_server()
+            serial = self._stream_serial
             port = _free_port()
             scid = secrets.randbelow(0x7FFFFFFF) + 1
             socket_name = f"scrcpy_{scid:08x}"
@@ -397,7 +434,7 @@ class ScrcpyScreencast:
             self._process = None
             self._port = None
             self._reader_thread = None
-            self._release(connection, process, port, None, remove_forward=True)
+            self._release(connection, process, port, None, remove_forward=True, serial=serial)
             raise ScreencastError(self._message) from exc
 
     def _push_server(self) -> None:
@@ -405,11 +442,24 @@ class ScrcpyScreencast:
             raise ScreencastError(
                 "找不到 scrcpy 投屏服务文件，请重新安装完整版本"
             )
+        if self._stream_serial is None:
+            # Preserve the single-device default, but pin its actual serial for
+            # the complete stream lifetime, including cleanup after a later connect.
+            result = self._run_adb("devices", "-l")
+            available = []
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) >= 2 and fields[1] == "device":
+                    available.append(fields[0])
+            if len(available) != 1:
+                raise ScreencastError("请先选择一个可用的 ADB 设备再启动投屏")
+            self._stream_serial = available[0]
         self._run_adb("push", str(self.server_path), SCRCPY_REMOTE_PATH, timeout=30)
 
     def _launch_server(self, scid: int) -> subprocess.Popen[str]:
         arguments = [
             self.adb_executable,
+            *(["-s", self._stream_serial] if self._stream_serial is not None else []),
             "shell",
             f"CLASSPATH={SCRCPY_REMOTE_PATH}",
             "app_process",
@@ -671,6 +721,7 @@ class ScrcpyScreencast:
             connection = self._socket
             process = self._process
             port = self._port
+            serial = self._stream_serial
             self._socket = None
             self._process = None
             self._port = None
@@ -678,7 +729,7 @@ class ScrcpyScreencast:
         try:
             for subscriber in subscribers:
                 self._offer(subscriber, None)
-            self._release(connection, process, port, None, remove_forward=True)
+            self._release(connection, process, port, None, remove_forward=True, serial=serial)
         finally:
             with self._lock:
                 self._closing = False
@@ -762,6 +813,7 @@ class ScrcpyScreencast:
         reader: Thread | None,
         *,
         remove_forward: bool = True,
+        serial: str | None | object = _CURRENT_DEVICE,
     ) -> None:
         if connection is not None:
             try:
@@ -790,6 +842,7 @@ class ScrcpyScreencast:
                 f"tcp:{port}",
                 check=False,
                 timeout=10,
+                serial=serial,
             )
         if reader is not None and reader is not current_thread():
             reader.join(timeout=3)
@@ -799,10 +852,15 @@ class ScrcpyScreencast:
         *arguments: str,
         check: bool = True,
         timeout: float = 20,
+        serial: str | None | object = _CURRENT_DEVICE,
     ) -> subprocess.CompletedProcess[str]:
+        target = self._stream_serial if serial is _CURRENT_DEVICE else serial
+        prefix = ["-s", target] if target is not None else []
+        if arguments[0] == "devices":
+            prefix = []
         try:
             result = subprocess.run(
-                [self.adb_executable, *arguments],
+                [self.adb_executable, *prefix, *arguments],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

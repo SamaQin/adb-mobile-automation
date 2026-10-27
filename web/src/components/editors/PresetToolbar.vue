@@ -17,6 +17,7 @@ import {
   Square,
   Trash2,
   Undo2,
+  Wifi,
 } from 'lucide-vue-next'
 import { downloadBlob } from '../../api/client.js'
 import { exportPresetArchive, importPresetArchive } from '../../api/archive.js'
@@ -102,7 +103,7 @@ async function save(title = '配置已保存') {
 
 async function run() {
   if (runStore.running) return safe(() => runStore.stop())
-  if (preparingRun.value || configStore.saving) return
+  if (preparingRun.value || configStore.saving || deviceStore.operationBusy) return
   preparingRun.value = true
   try {
     const connected = await deviceStore.check()
@@ -151,9 +152,10 @@ function changeAcceleration(event) {
   <header class="topbar panel">
     <div class="device-control">
       <span class="device-dot" :class="{ connected: deviceStore.connected }" />
-      <span><strong>{{ deviceStore.connected ? 'ADB 已连接' : 'ADB 未连接' }}</strong><small v-if="deviceStore.resolution">{{ deviceStore.resolution.width }}×{{ deviceStore.resolution.height }}</small><small v-else>{{ deviceStore.state }}</small></span>
+      <span><strong :title="deviceStore.serial || ''">{{ deviceStore.connected ? deviceStore.transport === 'wireless' ? '无线 ADB 已连接' : 'ADB 已连接' : 'ADB 未连接' }}</strong><small v-if="deviceStore.resolution">{{ deviceStore.resolution.width }}×{{ deviceStore.resolution.height }}</small><small v-else>{{ deviceStore.state }}</small></span>
       <button class="icon-button" title="检查设备" :disabled="deviceStore.checking" @click="safe(() => deviceStore.check())"><MonitorCheck :size="16" /></button>
     </div>
+    <button class="icon-button" title="无线连接与设备管理" aria-label="无线连接与设备管理" :aria-expanded="uiStore.wirelessDeviceOpen" @click="uiStore.wirelessDeviceOpen = true"><Wifi :size="16" /></button>
     <button
       class="icon-button monitor-toggle"
       :class="{ active: uiStore.deviceMonitorOpen }"
@@ -187,7 +189,7 @@ function changeAcceleration(event) {
       <button title="模板管理" @click="uiStore.templateDrawerOpen = true"><CheckCircle2 :size="16" /></button>
     </div>
     <button class="save-button" title="保存配置" :disabled="locked || !configStore.dirty" @click="safe(save)"><Save :size="16" /><span>{{ configStore.saving ? '保存中' : configStore.dirty ? '保存修改' : '已保存' }}</span><i v-if="configStore.dirty" /></button>
-    <button class="run-button" :class="{ stopping: runStore.running }" :title="runStore.running ? '停止运行' : '运行当前预设'" :disabled="configStore.saving || preparingRun || runStore.state === 'stopping'" @click="safe(run)"><Square v-if="runStore.running" :size="15" fill="currentColor" /><Play v-else :size="16" fill="currentColor" /><span>{{ runStore.state === 'stopping' ? '停止中…' : runStore.running ? '停止' : preparingRun ? '准备中…' : '运行' }}</span></button>
+    <button class="run-button" :class="{ stopping: runStore.running }" :title="runStore.running ? '停止运行' : '运行当前预设'" :disabled="configStore.saving || preparingRun || runStore.state === 'stopping' || deviceStore.operationBusy" @click="safe(run)"><Square v-if="runStore.running" :size="15" fill="currentColor" /><Play v-else :size="16" fill="currentColor" /><span>{{ runStore.state === 'stopping' ? '停止中…' : runStore.running ? '停止' : preparingRun ? '准备中…' : '运行' }}</span></button>
     <input ref="archiveInput" type="file" accept=".zip,.adb-preset.zip" hidden @change="safe(() => importArchive($event))" />
   </header>
 </template>

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AlertTriangle, RefreshCw, WifiOff, X } from 'lucide-vue-next'
 import DeviceMonitor from './components/DeviceMonitor.vue'
+import WirelessDevicePanel from './components/WirelessDevicePanel.vue'
 import AppDialog from './components/AppDialog.vue'
 import WorkspaceHelp from './components/WorkspaceHelp.vue'
 import WorkspaceStatus from './components/WorkspaceStatus.vue'
@@ -96,13 +97,13 @@ function globalKeys(event) {
   const ctrl = event.ctrlKey || event.metaKey
   if (ctrl && event.key.toLowerCase() === 's') {
     event.preventDefault()
-    if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || runStore.running || uiStore.readOnly || configStore.saving) return
+    if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || uiStore.wirelessDeviceOpen || runStore.running || uiStore.readOnly || configStore.saving) return
     target?.blur?.()
     configStore.save().then(() => uiStore.notify('配置已保存', 'success')).catch((error) => uiStore.notify(error.message, 'error'))
     return
   }
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName) || target?.isContentEditable) return
-  if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen) return
+  if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || uiStore.wirelessDeviceOpen) return
   if (event.key === '?' || event.key === 'F1') {
     event.preventDefault()
     uiStore.helpOpen = true
@@ -160,6 +161,7 @@ onBeforeUnmount(() => {
     </template>
 
     <DeviceMonitor v-if="ready && uiStore.deviceMonitorOpen" @hide="uiStore.deviceMonitorOpen = false" />
+    <WirelessDevicePanel v-if="ready && uiStore.wirelessDeviceOpen" @close="uiStore.wirelessDeviceOpen = false" />
     <TemplateManager v-if="uiStore.templateDrawerOpen" @close="uiStore.templateDrawerOpen = false" />
     <ScreenshotEditor v-if="uiStore.screenshotRequest" :request="uiStore.screenshotRequest" @close="uiStore.closeScreenshot($event)" />
 

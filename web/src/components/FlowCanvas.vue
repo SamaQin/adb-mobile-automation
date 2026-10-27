@@ -487,7 +487,7 @@ async function focusNode(stepId) {
 }
 
 function keydown(event) {
-  if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen) return
+  if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || uiStore.wirelessDeviceOpen) return
   const target = event.target
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName) || target?.isContentEditable) return
   const ctrl = event.ctrlKey || event.metaKey

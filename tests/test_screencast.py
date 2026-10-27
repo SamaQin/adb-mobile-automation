@@ -2,6 +2,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 import queue
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import Mock, patch
 
 from web_server.screencast import (
@@ -103,6 +106,110 @@ class ScreencastManagerTests(unittest.TestCase):
             self.assertIn("scrcpy", status["message"])
             manager.close()
             self.assertEqual("idle", manager.status()["state"])
+
+
+class ScreencastDeviceTests(unittest.TestCase):
+    def test_default_stream_pins_actual_serial_for_push_launch_and_cleanup(self):
+        with TemporaryDirectory() as directory:
+            server = Path(directory) / 'server.jar'
+            server.write_bytes(b'server')
+            manager = ScrcpyScreencast('adb', server)
+            commands = []
+            def run(command, **kwargs):
+                commands.append(command)
+                return subprocess.CompletedProcess(command, 0, 'List of devices attached\nUSB123 device model:Phone\n', '')
+            with patch('web_server.screencast.subprocess.run', side_effect=run), \
+                 patch('web_server.screencast.subprocess.Popen') as popen:
+                popen.return_value.stdout = None
+                manager._push_server()
+                manager._run_adb('forward', 'tcp:12345', 'localabstract:test')
+                manager._launch_server(1)
+                self.assertEqual(['adb', 'devices', '-l'], commands[0])
+                self.assertEqual(['adb', '-s', 'USB123', 'push'], commands[1][:4])
+                self.assertEqual(['adb', '-s', 'USB123', 'forward'], commands[2][:4])
+                self.assertEqual(['adb', '-s', 'USB123', 'shell'], popen.call_args.args[0][:4])
+                manager._serial = '10.0.35.91:5555'
+                manager._release(None, None, 12345, None, serial='USB123')
+                self.assertEqual(['adb', '-s', 'USB123', 'forward', '--remove', 'tcp:12345'], commands[-1])
+
+    def test_default_stream_requires_one_available_device(self):
+        with TemporaryDirectory() as directory:
+            server = Path(directory) / 'server.jar'
+            server.write_bytes(b'server')
+            manager = ScrcpyScreencast('adb', server)
+            with patch('web_server.screencast.subprocess.run', return_value=subprocess.CompletedProcess([], 0, 'A device\nB device\n', '')) as run:
+                with self.assertRaisesRegex(ScreencastError, '选择'):
+                    manager._push_server()
+            self.assertEqual(1, run.call_count)
+
+    def test_switch_closes_old_stream_and_removes_only_its_forward(self):
+        from web_server.screencast import FrameSubscriber
+        manager = ScrcpyScreencast('adb', 'server')
+        manager.set_device('USB123')
+        manager._stream_serial = 'USB123'
+        manager._port = 12345
+        manager._socket = Mock()
+        subscriber = FrameSubscriber(1, queue.Queue(maxsize=2), codec='h264')
+        subscriber.frames.put(b'old')
+        manager._subscribers[1] = subscriber
+        with patch('web_server.screencast.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
+            manager.set_device('10.0.35.91:5555')
+        self.assertEqual(['adb', '-s', 'USB123', 'forward', '--remove', 'tcp:12345'], run.call_args.args[0])
+        self.assertEqual('10.0.35.91:5555', manager._serial)
+        self.assertIsNone(subscriber.frames.get_nowait())
+        self.assertTrue(subscriber.frames.empty())
+        self.assertIsNone(manager._port)
+        self.assertEqual('idle', manager.status()['state'])
+        with patch.object(manager, 'close') as close:
+            manager.set_device('10.0.35.91:5555')
+        close.assert_not_called()
+
+    def test_subscribe_waits_for_cleanup_and_starts_with_new_target(self):
+        manager = ScrcpyScreencast('adb', 'server')
+        manager.set_device('USB123')
+        manager._stream_serial = 'USB123'
+        entered, release = Event(), Event()
+        def cleanup(*args, **kwargs):
+            self.assertEqual('USB123', kwargs['serial'])
+            entered.set()
+            self.assertTrue(release.wait(2))
+        started = []
+        def start():
+            started.append(manager._serial)
+            manager._reader_thread = Mock(is_alive=Mock(return_value=True))
+        with patch.object(manager, '_release', side_effect=cleanup), \
+             patch.object(manager, '_start_locked', side_effect=start), \
+             patch.object(manager, '_schedule_subscriber_guard_locked'):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                switch = pool.submit(manager.set_device, '10.0.35.91:5555')
+                self.assertTrue(entered.wait(2))
+                subscription = pool.submit(manager.subscribe_h264)
+                self.assertFalse(subscription.done())
+                release.set()
+                switch.result(timeout=2)
+                subscriber = subscription.result(timeout=2)
+        self.assertEqual(['10.0.35.91:5555'], started)
+        self.assertEqual('h264', subscriber.codec)
+
+    def test_failed_stream_cleanup_uses_stream_serial(self):
+        manager = ScrcpyScreencast('adb', 'server')
+        manager._serial = 'new-device'
+        manager._stream_serial = 'old-device'
+        manager._port = 12345
+        with patch('web_server.screencast.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
+            manager._fail(ScreencastError('stream ended'))
+        self.assertEqual(['adb', '-s', 'old-device', 'forward', '--remove', 'tcp:12345'], run.call_args.args[0])
+
+    def test_explicit_target_start_failure_removes_forward_from_same_target(self):
+        manager = ScrcpyScreencast('adb', 'server')
+        manager.set_device('[2001:db8::1]:5555')
+        with patch.object(manager, '_push_server'), \
+             patch('web_server.screencast._free_port', return_value=12345), \
+             patch.object(manager, '_launch_server', side_effect=ScreencastError('start failed')), \
+             patch('web_server.screencast.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
+            with self.assertRaisesRegex(ScreencastError, 'start failed'):
+                manager.subscribe_h264()
+        self.assertEqual(['adb', '-s', '[2001:db8::1]:5555', 'forward', '--remove', 'tcp:12345'], run.call_args.args[0])
 
 
 class H264SubscriptionTests(unittest.TestCase):
