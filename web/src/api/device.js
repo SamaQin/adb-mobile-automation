@@ -54,3 +54,7 @@ export function deviceStreamUrl(token = '', codec = 'jpeg') {
 export async function fetchStreamStatus() {
   return request('/api/device/stream/status', { cache: 'no-store' })
 }
+
+export function sendDeviceInput(input) {
+  return request('/api/device/input', { method: 'POST', body: input })
+}

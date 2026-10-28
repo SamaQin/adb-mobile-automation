@@ -16,7 +16,9 @@ from model_automation.steps import (
     REGISTRY,
     run_find_and_multi_tap,
     run_find_and_tap,
+    run_recorded_actions,
     run_run_preset,
+    step_summary,
 )
 from model_automation.vision import save_image
 
@@ -1258,6 +1260,112 @@ class RuntimeValidationTests(unittest.TestCase):
                         result = run_find_and_tap(step, make_context(device, template_dir))
                         self.assertEqual(not require_all, result.success)
                         self.assertEqual([] if require_all else [(42, 30)], device.taps)
+
+
+class RecordedActionsTests(unittest.TestCase):
+    def test_empty_actions_fail_without_device_calls(self) -> None:
+        device = FakeDevice(np.zeros((80, 100, 3), np.uint8))
+        context = make_context(device, Path("templates"))
+
+        result = run_recorded_actions(
+            Step(name="recorded", kind="recorded_actions", params={"actions": []}),
+            context,
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("尚未录制操作", result.message)
+        self.assertEqual([], device.actions)
+
+    def test_actions_replay_in_order_with_relative_waits(self) -> None:
+        device = FakeDevice(np.zeros((80, 100, 3), np.uint8))
+        context = make_context(device, Path("templates"))
+        waits: list[float] = []
+        actions = [
+            {"type": "tap", "x": 10, "y": 20, "at": 0},
+            {"type": "swipe", "x1": 30, "y1": 40, "x2": 50, "y2": 60,
+             "duration": 300, "at": 250},
+            {"type": "tap", "x": 70, "y": 80, "at": 800},
+        ]
+
+        with patch.object(RuntimeContext, "wait", new=lambda _self, seconds: waits.append(seconds) or True):
+            result = run_recorded_actions(
+                Step(name="recorded", kind="recorded_actions", params={"actions": actions}),
+                context,
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual([0.25, 0.25], waits)
+        self.assertEqual(
+            [("tap", (10, 20)), ("swipe", (30, 40, 50, 60, 300)), ("tap", (70, 80))],
+            device.actions,
+        )
+
+    def test_first_action_is_immediate_and_last_has_no_trailing_wait(self) -> None:
+        device = FakeDevice(np.zeros((80, 100, 3), np.uint8))
+        context = make_context(device, Path("templates"))
+        waits: list[float] = []
+        actions = [
+            {"type": "swipe", "x1": 1, "y1": 2, "x2": 3, "y2": 4,
+             "duration": 120, "at": 0},
+        ]
+
+        with patch.object(RuntimeContext, "wait", new=lambda _self, seconds: waits.append(seconds) or True):
+            result = run_recorded_actions(
+                Step(name="recorded", kind="recorded_actions", params={"actions": actions}),
+                context,
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual([], waits)
+        self.assertEqual([("swipe", (1, 2, 3, 4, 120))], device.actions)
+
+    def test_stop_before_first_action_prevents_device_calls(self) -> None:
+        device = FakeDevice(np.zeros((80, 100, 3), np.uint8))
+        context = make_context(device, Path("templates"))
+        context.stop_event.set()
+
+        result = run_recorded_actions(
+            Step(name="recorded", kind="recorded_actions", params={"actions": [
+                {"type": "tap", "x": 1, "y": 2, "at": 0},
+            ]}),
+            context,
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("执行已停止", result.message)
+        self.assertEqual([], device.actions)
+
+    def test_validation_rejects_invalid_actions_and_allows_empty(self) -> None:
+        definition = REGISTRY.get("recorded_actions")
+        self.assertIsNotNone(definition)
+        self.assertEqual({"actions": []}, definition.validate_params({}))
+
+        invalid = [
+            {"actions": "bad"},
+            {"actions": [{"type": "tap", "x": True, "y": 1, "at": 0}]},
+            {"actions": [{"type": "tap", "x": -1, "y": 1, "at": 0}]},
+            {"actions": [{"type": "swipe", "x1": 0, "y1": 0, "x2": 1, "y2": 1,
+                          "duration": 0, "at": 0}]},
+            {"actions": [{"type": "swipe", "x1": 0, "y1": 0, "x2": 1, "y2": 1,
+                          "duration": 5001, "at": 0}]},
+            {"actions": [{"type": "tap", "x": 1, "y": 1, "at": 10}]},
+            {"actions": [{"type": "tap", "x": 1, "y": 1, "at": 20},
+                         {"type": "tap", "x": 2, "y": 2, "at": 10}]},
+            {"actions": [{"type": "nope", "x": 1, "y": 1, "at": 0}]},
+            {"actions": [{"type": "tap", "x": 1, "y": 1, "at": 0}] * 1001},
+        ]
+        for params in invalid:
+            with self.subTest(params=str(params)[:80]), self.assertRaises(ValueError):
+                definition.validate_params(params)
+
+    def test_step_summary_reports_count_and_duration(self) -> None:
+        step = Step(name="recorded", kind="recorded_actions", params={"actions": [
+            {"type": "tap", "x": 10, "y": 20, "at": 0},
+            {"type": "swipe", "x1": 30, "y1": 40, "x2": 50, "y2": 60,
+             "duration": 300, "at": 1000},
+        ]})
+
+        self.assertEqual("2 个操作 · 1.3 秒", step_summary(step))
 
 
 if __name__ == "__main__":

@@ -61,6 +61,9 @@ class FieldSpec:
             holder = {"templates": deepcopy(value)}
             _validate_templates(holder, self.label)
             return holder["templates"]
+        if self.kind == "recording":
+            from .recorded_actions import normalize_actions
+            return normalize_actions(value)
         return value
 
 

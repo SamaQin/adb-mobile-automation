@@ -10,7 +10,7 @@ export const useRunStore = defineStore('run', {
     state: 'idle', status: 'idle', presetId: null, cycle: 0, rootCycle: 0,
     stepIndex: 0, stepCount: 0, message: '', logs: markRaw([]), nodeStates: {},
     runId: null, serverId: null, retiredServers: [], lastSeq: -1, nodeRevision: 0, frames: [],
-    wsState: 'disconnected', socket: null,
+    wsState: 'disconnected', socket: null, preparing: false,
   }),
   getters: {
     running: (state) => ['starting', 'running', 'stopping'].includes(state.state),
@@ -151,13 +151,15 @@ export const useRunStore = defineStore('run', {
       if (serverId !== this.serverId && payload.server_id !== this.serverId) return
       this.applyStatus(payload)
     },
-    async start(presetId) {
+    async start(presetId, startStepId = null) {
       this.replaceNodeStates()
       this.clearLogs()
       this.applyStatus({ state: 'running', preset_id: presetId, cycle: 1 })
       const serverId = this.serverId
       try {
-        const result = await startRun(presetId)
+        const result = startStepId
+          ? await startRun(presetId, startStepId)
+          : await startRun(presetId)
         if (result && typeof result === 'object' && (serverId === this.serverId || result.server_id === this.serverId)) this.applyStatus(result)
       } catch (error) {
         this.state = 'idle'

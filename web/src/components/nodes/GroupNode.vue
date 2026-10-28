@@ -11,7 +11,7 @@ const configStore = useConfigStore()
 const layoutStore = useLayoutStore()
 const runStore = useRunStore()
 const uiStore = useUiStore()
-const locked = computed(() => uiStore.readOnly || runStore.running || configStore.saving)
+const locked = computed(() => uiStore.readOnly || runStore.running || runStore.preparing || configStore.saving)
 
 function remove() {
   if (locked.value) return

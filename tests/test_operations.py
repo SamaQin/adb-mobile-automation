@@ -343,6 +343,15 @@ class FieldValidationTests(unittest.TestCase):
         preset = Preset(name="preset", steps=[Step(name="step", kind=kind, params=params)])
         return AppConfig(presets=[preset], selected_preset_id=preset.id).to_dict()
 
+    def test_recorded_actions_accept_empty_and_reject_invalid_sequences(self):
+        config = config_from_payload(self.payload("recorded_actions", {"actions": []}))
+        self.assertEqual([], config.presets[0].steps[0].params["actions"])
+        with self.assertRaises(ValidationError):
+            config_from_payload(self.payload(
+                "recorded_actions",
+                {"actions": [{"type": "tap", "x": 1, "y": 1, "at": 10}]},
+            ))
+
     def test_invalid_field_types_ranges_and_nonfinite_numbers_are_rejected(self):
         cases = [("tap", "x", True), ("tap", "y", 1.2), ("tap", "x", -1),
                  ("swipe", "duration", -1), ("wait", "seconds", -0.1),

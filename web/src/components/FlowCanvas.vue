@@ -13,6 +13,7 @@ import {
   Lock,
   Minus,
   Pencil,
+  Play,
   Plus,
   Power,
   Unlock,
@@ -33,6 +34,7 @@ import { useConfigStore } from '../stores/configStore.js'
 import { useLayoutStore } from '../stores/layoutStore.js'
 import { useRunStore } from '../stores/runStore.js'
 import { useUiStore } from '../stores/uiStore.js'
+import { useWorkflowRun } from '../composables/useWorkflowRun.js'
 import StartNode from './nodes/StartNode.vue'
 import StepNode from './nodes/StepNode.vue'
 import BranchNode from './nodes/BranchNode.vue'
@@ -42,6 +44,7 @@ const configStore = useConfigStore()
 const layoutStore = useLayoutStore()
 const runStore = useRunStore()
 const uiStore = useUiStore()
+const { startWorkflow } = useWorkflowRun()
 const flowElement = ref(null)
 const fileInput = ref(null)
 const nodes = ref([])
@@ -49,12 +52,12 @@ const edges = ref([])
 const contextMenu = ref(null)
 const nodeTypes = { start: markRaw(StartNode), step: markRaw(StepNode), branch: markRaw(BranchNode), group: markRaw(GroupNode) }
 const { fitView, zoomIn, zoomOut, screenToFlowCoordinate, setCenter, getViewport, updateNodeInternals } = useVueFlow()
-const locked = computed(() => uiStore.readOnly || runStore.running || configStore.saving)
+const locked = computed(() => uiStore.readOnly || runStore.running || runStore.preparing || configStore.saving)
 const interactionsEnabled = ref(true)
 const legendExpanded = ref(false)
 const emptyPreset = computed(() => Boolean(configStore.selectedPreset && !configStore.selectedPreset.steps.length))
 const quickSteps = computed(() => ['wait', 'tap', 'find_and_tap'].map((kind) => configStore.definitions.find((definition) => definition.key === kind)).filter(Boolean))
-const lockReason = computed(() => runStore.running ? '正在运行，可选步骤查看；停止后可编辑' : configStore.saving ? '正在保存，可选步骤查看；稍后可编辑' : '只读模式，可选步骤查看；关闭只读后可编辑')
+const lockReason = computed(() => runStore.running ? '正在运行，可选步骤查看；停止后可编辑' : runStore.preparing ? '正在准备运行，请稍候' : configStore.saving ? '正在保存，可选步骤查看；稍后可编辑' : '只读模式，可选步骤查看；关闭只读后可编辑')
 const addFeedback = ref('')
 let feedbackTimer = null
 watch(() => uiStore.selectedNodeId, (id) => { if (id) uiStore.propertiesCollapsed = false })
@@ -293,6 +296,17 @@ function contextStep() {
   return configStore.findStep(contextMenu.value?.nodeId).step
 }
 
+async function runContextStep() {
+  const nodeId = contextMenu.value?.nodeId
+  closeContextMenu()
+  if (!nodeId) return
+  try {
+    await startWorkflow(nodeId)
+  } catch (error) {
+    uiStore.notify(error.message, 'error')
+  }
+}
+
 function openProperties() {
   uiStore.selectNode(contextMenu.value.nodeId)
   uiStore.propertiesCollapsed = false
@@ -487,7 +501,7 @@ async function focusNode(stepId) {
 }
 
 function keydown(event) {
-  if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || uiStore.wirelessDeviceOpen) return
+  if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || uiStore.wirelessDeviceOpen || uiStore.recordingOpen) return
   const target = event.target
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName) || target?.isContentEditable) return
   const ctrl = event.ctrlKey || event.metaKey
@@ -615,6 +629,7 @@ defineExpose({ nodes, edges, autoLayout, resetLayout, reorderByLayout, exportJso
       </template>
       <template v-else-if="contextMenu.type === 'step'">
         <header><strong>{{ contextStep()?.name }}</strong><small>{{ contextNode()?.data?.def?.label || contextStep()?.kind }}</small></header>
+        <button v-if="!contextNode()?.data?.isBranch" :disabled="locked || !contextStep()?.enabled" @click="runContextStep"><Play :size="15" fill="currentColor" /><span>从此步骤运行</span></button>
         <button @click="openProperties"><Eye :size="15" /><span>{{ locked ? '查看属性' : '修改属性' }}</span></button>
         <button :disabled="locked" @click="renameContextStep"><Pencil :size="15" /><span>重命名</span></button>
         <button :disabled="locked" @click="toggleContextStep"><Power :size="15" /><span>{{ contextStep()?.enabled ? '停用步骤' : '启用步骤' }}</span></button>

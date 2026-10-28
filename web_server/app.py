@@ -254,6 +254,7 @@ def create_app(
             screencast_manager = ScrcpyScreencast(
                 adb_executable,
                 _scrcpy_server_path(),
+                environment=getattr(injected_device, "environment", None),
             )
             selected_serial = getattr(injected_device, "selected_serial", None)
             if selected_serial is not None:
@@ -303,19 +304,6 @@ def create_app(
     def device_state() -> dict[str, Any]:
         try:
             state = injected_device.state()
-            if state != "device":
-                result = {"connected": False, "state": state, "resolution": None, **device_metadata()}
-                manager.publish_device(result)
-                return {**result, "device": result}
-            width, height = injected_device.screen_resolution()
-            result = {
-                "connected": True,
-                "state": state,
-                "resolution": {"width": width, "height": height},
-                **device_metadata(),
-            }
-            manager.publish_device(result)
-            return {**result, "device": result}
         except DeviceError as exc:
             result = {
                 "connected": False,
@@ -326,6 +314,35 @@ def create_app(
             }
             manager.publish_device(result)
             return {**result, "device": result}
+
+        if state != "device":
+            result = {"connected": False, "state": state, "resolution": None, **device_metadata()}
+            manager.publish_device(result)
+            return {**result, "device": result}
+
+        try:
+            width, height = injected_device.screen_resolution()
+        except DeviceError as exc:
+            # ADB transport is healthy even when the diagnostic screenshot fails.
+            # Keep the connection usable and expose the separate health detail.
+            result = {
+                "connected": True,
+                "state": state,
+                "resolution": None,
+                "error": str(exc),
+                **device_metadata(),
+            }
+            manager.publish_device(result)
+            return {**result, "device": result}
+
+        result = {
+            "connected": True,
+            "state": state,
+            "resolution": {"width": width, "height": height},
+            **device_metadata(),
+        }
+        manager.publish_device(result)
+        return {**result, "device": result}
 
     def device_method(name: str):
         action = getattr(injected_device, name, None)
@@ -382,6 +399,61 @@ def create_app(
             result = device_method("enable_wireless")(payload.get("port", 5555))
             sync_screencast_device()
             return {**result, "device": device_state()["device"], **device_catalog()}
+
+    @application.post("/api/device/input")
+    def device_input(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        kind = payload.get("type")
+        if kind not in {"tap", "swipe"}:
+            raise _detail(400, "输入类型仅支持 tap 或 swipe")
+        serial = payload.get("serial")
+        if serial is not None:
+            if not isinstance(serial, str) or not serial.strip() or serial.startswith("-"):
+                raise _detail(400, "设备序列号无效")
+            serial = serial.strip()
+
+        def number(key: str, *, maximum: int | None = None) -> int:
+            value = payload.get(key)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise _detail(400, f"{key} 必须是整数")
+            if value < 0 or (maximum is not None and value > maximum):
+                raise _detail(400, f"{key} 超出允许范围")
+            return value
+
+        if kind == "tap":
+            x = number("x")
+            y = number("y")
+        else:
+            x1 = number("x1")
+            y1 = number("y1")
+            x2 = number("x2")
+            y2 = number("y2")
+            duration = number("duration", maximum=5000)
+            if duration < 1:
+                raise _detail(400, "duration 必须在 1 到 5000 毫秒之间")
+
+        try:
+            with manager.mutation():
+                if kind == "tap":
+                    action = getattr(injected_device, "tap_on" if serial else "tap", None)
+                    if not callable(action):
+                        raise _detail(400, "当前设备接口不支持指定设备输入")
+                    if serial:
+                        action(serial, x, y)
+                    else:
+                        action(x, y)
+                else:
+                    action = getattr(injected_device, "swipe_on" if serial else "swipe", None)
+                    if not callable(action):
+                        raise _detail(400, "当前设备接口不支持指定设备输入")
+                    if serial:
+                        action(serial, x1, y1, x2, y2, duration)
+                    else:
+                        action(x1, y1, x2, y2, duration)
+        except RuntimeConflict as exc:
+            raise _detail(409, str(exc)) from exc
+        except DeviceError as exc:
+            raise _detail(503, str(exc)) from exc
+        return {"ok": True}
 
     @application.get("/api/device/screenshot")
     def device_screenshot(
@@ -534,8 +606,12 @@ def create_app(
         preset_id = str(payload.get("preset_id", "")).strip()
         if not preset_id:
             raise _detail(400, "preset_id 不能为空")
+        raw_start_step_id = payload.get("start_step_id")
+        if raw_start_step_id is not None and not isinstance(raw_start_step_id, str):
+            raise _detail(400, "start_step_id 必须是字符串")
+        start_step_id = (raw_start_step_id or "").strip() or None
         try:
-            return manager.start(preset_id)
+            return manager.start(preset_id, start_step_id)
         except RuntimeConflict as exc:
             raise _detail(409, str(exc)) from exc
         except DeviceError as exc:

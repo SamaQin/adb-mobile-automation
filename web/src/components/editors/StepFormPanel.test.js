@@ -44,6 +44,16 @@ it('shows ROI fields only when enabled and restores device-pixel rectangles in o
   wrapper.unmount()
 })
 
+it('renders the recording field for recorded action steps', () => {
+  const { wrapper } = setup(
+    [{ key: 'actions', label: '操作序列', kind: 'recording', default: [] }],
+    { actions: [] },
+    'recorded_actions',
+  )
+  expect(wrapper.find('.recording-field').exists()).toBe(true)
+  wrapper.unmount()
+})
+
 it('groups recognition controls and reveals saved inactive settings without showing disabled coordinates', async () => {
   const { wrapper } = setup([
     { key: 'templates', kind: 'templates', default: [] },

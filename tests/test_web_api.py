@@ -19,6 +19,7 @@ warnings.filterwarnings(
 from fastapi.testclient import TestClient
 
 from model_automation.config import ConfigStore
+from model_automation.device import DeviceError
 from model_automation.models import AppConfig, Preset, Step
 from web_server import create_app
 
@@ -27,6 +28,7 @@ class FakeDevice:
     def __init__(self) -> None:
         y, x = np.indices((60, 100))
         self.screen = np.dstack((x, y, (x + y) % 255)).astype(np.uint8)
+        self.inputs: list[tuple] = []
 
     def state(self) -> str:
         return "device"
@@ -37,11 +39,18 @@ class FakeDevice:
     def screen_resolution(self) -> tuple[int, int]:
         return 100, 60
 
-    def tap(self, _x: int, _y: int) -> None:
-        pass
+    def tap(self, x: int, y: int) -> None:
+        self.inputs.append(("tap", None, x, y))
 
-    def swipe(self, _x1: int, _y1: int, _x2: int, _y2: int, _duration: int) -> None:
-        pass
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int) -> None:
+        self.inputs.append(("swipe", None, x1, y1, x2, y2, duration))
+
+    def tap_on(self, serial: str, x: int, y: int) -> None:
+        self.inputs.append(("tap", serial, x, y))
+
+    def swipe_on(self, serial: str, x1: int, y1: int, x2: int, y2: int,
+                 duration: int) -> None:
+        self.inputs.append(("swipe", serial, x1, y1, x2, y2, duration))
 
 
 def png_bytes(image: np.ndarray) -> bytes:
@@ -106,6 +115,7 @@ class WebApiTests(unittest.TestCase):
         self.assertTrue(device["device"]["connected"])
 
         definitions = self.client.get("/api/step-definitions").json()
+        self.assertIn("recorded_actions", {item["key"] for item in definitions})
         find_definition = next(item for item in definitions if item["key"] == "find_and_tap")
         self.assertTrue(find_definition["can_fail"])
         self.assertTrue(any(field["kind"] == "templates" for field in find_definition["fields"]))
@@ -120,6 +130,58 @@ class WebApiTests(unittest.TestCase):
             "/api/settings/acceleration", json={"acceleration": "cpu"}
         )
         self.assertEqual("cpu", acceleration.json()["acceleration"])
+
+    def test_device_state_keeps_transport_connected_when_screenshot_fails(self) -> None:
+        with patch.object(self.device, "screen_resolution", side_effect=DeviceError("截图失败：设备截图为空")):
+            response = self.client.get("/api/device/state")
+
+        self.assertEqual(200, response.status_code)
+        device = response.json()["device"]
+        self.assertTrue(device["connected"])
+        self.assertEqual("device", device["state"])
+        self.assertIsNone(device["resolution"])
+        self.assertEqual("截图失败：设备截图为空", device["error"])
+
+    def test_device_input_tap_and_swipe_with_optional_serial(self) -> None:
+        tap = self.client.post(
+            "/api/device/input",
+            json={"type": "tap", "x": 10, "y": 20, "serial": "USB123"},
+        )
+        self.assertEqual(200, tap.status_code, tap.text)
+        swipe = self.client.post(
+            "/api/device/input",
+            json={"type": "swipe", "x1": 1, "y1": 2, "x2": 3, "y2": 4,
+                  "duration": 300, "serial": "USB123"},
+        )
+        self.assertEqual(200, swipe.status_code, swipe.text)
+        self.assertEqual([
+            ("tap", "USB123", 10, 20),
+            ("swipe", "USB123", 1, 2, 3, 4, 300),
+        ], self.device.inputs)
+
+    def test_device_input_rejects_invalid_payload(self) -> None:
+        invalid = [
+            {},
+            {"type": "tap", "x": True, "y": 1},
+            {"type": "tap", "x": -1, "y": 1},
+            {"type": "swipe", "x1": 0, "y1": 0, "x2": 1, "y2": 1, "duration": 0},
+            {"type": "swipe", "x1": 0, "y1": 0, "x2": 1, "y2": 1, "duration": 5001},
+            {"type": "tap", "x": 1, "y": 1, "serial": "-a"},
+        ]
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                response = self.client.post("/api/device/input", json=payload)
+                self.assertEqual(400, response.status_code, response.text)
+        self.assertEqual([], self.device.inputs)
+
+    def test_device_input_is_rejected_while_a_preset_runs(self) -> None:
+        preset = Preset(name="running", steps=[Step(name="wait", kind="wait", params={"seconds": 5})])
+        self.save([preset])
+        self.assertEqual(200, self.client.post("/api/run", json={"preset_id": preset.id}).status_code)
+        response = self.client.post("/api/device/input", json={"type": "tap", "x": 1, "y": 2})
+        self.assertEqual(409, response.status_code)
+        self.assertEqual([], self.device.inputs)
+        self.assertEqual(200, self.client.post("/api/stop").status_code)
 
     def test_duplicate_and_reference_scan_include_nested_steps(self) -> None:
         target = Preset(name="target")
@@ -312,6 +374,40 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual("stopped", snapshot["data"]["last_status"])
         self.assertIn("node_states", snapshot["data"])
         self.assertEqual(events[-1]["seq"], snapshot["seq"])
+
+    def test_run_accepts_start_step_and_rejects_invalid_start(self) -> None:
+        first = Step(name="first", kind="wait", params={"seconds": 5})
+        second = Step(name="second", kind="wait", params={"seconds": 0.01})
+        preset = Preset(name="start", steps=[first, second])
+        self.save([preset])
+
+        started = self.client.post(
+            "/api/run",
+            json={"preset_id": preset.id, "start_step_id": second.id},
+        )
+        self.assertEqual(200, started.status_code, started.text)
+        self.assertEqual("running", started.json()["state"])
+
+        deadline = time.monotonic() + 2
+        while self.client.get("/api/run/status").json()["state"] != "idle":
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
+        events = self.client.app.state.runtime.events()
+        running_ids = {
+            event["data"]["step_id"]
+            for event in events
+            if event["type"] == "step" and event["data"]["state"] == "running"
+        }
+        self.assertEqual({second.id}, running_ids)
+        self.assertEqual("completed", self.client.get("/api/run/status").json()["last_status"])
+
+        invalid = self.client.post(
+            "/api/run",
+            json={"preset_id": preset.id, "start_step_id": "missing"},
+        )
+        self.assertEqual(400, invalid.status_code)
+        self.assertEqual("idle", self.client.get("/api/run/status").json()["state"])
 
     def test_template_list_indexes_references_once_and_thumbnails_revalidate(self) -> None:
         from model_automation.operations import template_reference_index

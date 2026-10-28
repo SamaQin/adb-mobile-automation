@@ -11,7 +11,7 @@ const configStore = useConfigStore()
 const runStore = useRunStore()
 const uiStore = useUiStore()
 const query = ref('')
-const lockReason = computed(() => runStore.running ? '正在运行，停止后可添加步骤' : configStore.saving ? '正在保存，请稍后添加步骤' : uiStore.readOnly ? '当前为只读模式，关闭只读后可添加步骤' : !configStore.selectedPreset ? '先选择或新建一个预设，再添加步骤' : '')
+const lockReason = computed(() => runStore.running ? '正在运行，停止后可添加步骤' : runStore.preparing ? '正在准备运行，请稍后添加步骤' : configStore.saving ? '正在保存，请稍后添加步骤' : uiStore.readOnly ? '当前为只读模式，关闭只读后可添加步骤' : !configStore.selectedPreset ? '先选择或新建一个预设，再添加步骤' : '')
 const locked = computed(() => Boolean(lockReason.value))
 const definitions = computed(() => configStore.definitions.filter((item) => matchesStepSearch(item, query.value)))
 

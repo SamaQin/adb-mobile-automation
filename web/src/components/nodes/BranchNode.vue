@@ -13,7 +13,7 @@ const runStore = useRunStore()
 const uiStore = useUiStore()
 const appearance = computed(() => appearanceFor(props.data.step?.kind))
 const Icon = computed(() => appearance.value.icon)
-const locked = computed(() => uiStore.readOnly || runStore.running || configStore.saving)
+const locked = computed(() => uiStore.readOnly || runStore.running || runStore.preparing || configStore.saving)
 const nestedBranchCount = computed(() => Object.values(props.data.step?.params?.branches || {}).reduce((count, steps) => count + (steps?.length || 0), 0))
 </script>
 

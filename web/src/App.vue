@@ -97,13 +97,13 @@ function globalKeys(event) {
   const ctrl = event.ctrlKey || event.metaKey
   if (ctrl && event.key.toLowerCase() === 's') {
     event.preventDefault()
-    if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || uiStore.wirelessDeviceOpen || runStore.running || uiStore.readOnly || configStore.saving) return
+    if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || uiStore.wirelessDeviceOpen || uiStore.recordingOpen || runStore.running || uiStore.readOnly || configStore.saving) return
     target?.blur?.()
     configStore.save().then(() => uiStore.notify('配置已保存', 'success')).catch((error) => uiStore.notify(error.message, 'error'))
     return
   }
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName) || target?.isContentEditable) return
-  if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || uiStore.wirelessDeviceOpen) return
+  if (uiStore.dialog || uiStore.helpOpen || uiStore.screenshotRequest || uiStore.templateDrawerOpen || uiStore.wirelessDeviceOpen || uiStore.recordingOpen) return
   if (event.key === '?' || event.key === 'F1') {
     event.preventDefault()
     uiStore.helpOpen = true

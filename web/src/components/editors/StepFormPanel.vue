@@ -8,6 +8,7 @@ import { useRunStore } from '../../stores/runStore.js'
 import { useUiStore } from '../../stores/uiStore.js'
 import { cloneJson } from '../../utils/clone.js'
 import BranchEditor from './BranchEditor.vue'
+import RecordedActionsField from './RecordedActionsField.vue'
 import TemplatePicker from './TemplatePicker.vue'
 
 const props = defineProps({ nodeId: { type: String, required: true } })
@@ -73,8 +74,8 @@ const editorGroups = computed(() => {
     return { ...group, fields, configured, retained, entries: toEntries(fields.filter(isVisible)) }
   }).filter((group) => group.fields.length)
 })
-const disabled = computed(() => uiStore.readOnly || runStore.running || configStore.saving)
-const disabledReason = computed(() => runStore.running ? '运行中暂不能修改参数或选取坐标，请停止后编辑。' : uiStore.readOnly ? '当前为只读模式，可以查看参数，不能修改。' : configStore.saving ? '正在保存，请稍候再编辑。' : '')
+const disabled = computed(() => uiStore.readOnly || runStore.running || runStore.preparing || configStore.saving)
+const disabledReason = computed(() => runStore.running ? '运行中暂不能修改参数或选取坐标，请停止后编辑。' : runStore.preparing ? '正在准备运行，请稍候再编辑。' : uiStore.readOnly ? '当前为只读模式，可以查看参数，不能修改。' : configStore.saving ? '正在保存，请稍候再编辑。' : '')
 const resolutionMismatch = computed(() => {
   const saved = step.value?.screen_resolution
   const current = deviceStore.resolution
@@ -91,6 +92,7 @@ function hintFor(field) {
     tap_between: '每次重试前先点击指定位置。', swipe_between: '每次重试前先按指定路线滑动。',
   }
   if (hints[field.key]) return hints[field.key]
+  if (field.kind === 'recording') return '第一次输入开始计时，最后一次输入结束；重录会整段替换。'
   if (field.coordinate_axis) return field.coordinate_offset ? '原始设备像素；允许负数。' : '单位：原始设备像素。'
   if (field.key === 'duration') return '单位：毫秒；1000 毫秒 = 1 秒。'
   if (['wait_after', 'seconds', 'click_interval'].includes(field.key)) return '单位：秒；0 表示不等待。'
@@ -244,6 +246,9 @@ async function adaptResolution() {
         <div v-else-if="entry.field.kind === 'templates'" class="template-field" :aria-invalid="Boolean(errors.templates)">
           <TemplatePicker :model-value="step.params[entry.field.key] || []" :disabled="disabled" @update:model-value="updateTemplates" />
           <p v-if="errors.templates" class="field-error" role="alert">{{ errors.templates }}</p>
+        </div>
+        <div v-else-if="entry.field.kind === 'recording'" class="recording-field">
+          <RecordedActionsField :node-id="nodeId" :step="step" :disabled="disabled" />
         </div>
         <div v-else-if="entry.field.kind === 'choice'" class="choice-field">
           <span>{{ entry.field.label }}</span>

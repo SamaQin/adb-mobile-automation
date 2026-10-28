@@ -4,6 +4,7 @@ import {
   GitBranch,
   Hourglass,
   Layers3,
+  MousePointerClick,
   Play,
   Repeat2,
   Route,
@@ -17,6 +18,7 @@ export const NODE_APPEARANCE = {
   wait: { color: '#94a3b8', icon: Hourglass },
   end_loop: { color: '#c084fc', icon: Repeat2 },
   run_preset: { color: '#22d3ee', icon: Play },
+  recorded_actions: { color: '#f472b6', icon: MousePointerClick },
   branch: { color: '#f59e0b', icon: GitBranch },
   group: { color: '#94a3b8', icon: Layers3 },
   default: { color: '#94a3b8', icon: CircleDot },
@@ -30,6 +32,7 @@ const STEP_GUIDANCE = {
   wait: { description: '暂停几秒，等页面加载完成', aliases: '延时 延迟 暂停 休息 加载 等待' },
   end_loop: { description: '结束这一轮，从下一轮重新开始', aliases: '循环 下一轮 结束 跳过 本轮' },
   run_preset: { description: '接着执行另一组已保存的步骤', aliases: '调用 子流程 复用 预设 组合 另一组' },
+  recorded_actions: { description: '录制一段点击、长按或滑动操作，运行时按原时间回放', aliases: '录制 回放 手势 触摸 操作 录屏' },
 }
 
 export function descriptionFor(kind) {

@@ -27,6 +27,7 @@ import { useHistoryStore } from '../../stores/historyStore.js'
 import { useRunStore } from '../../stores/runStore.js'
 import { useUiStore } from '../../stores/uiStore.js'
 import { useTemplateStore } from '../../stores/templateStore.js'
+import { useWorkflowRun } from '../../composables/useWorkflowRun.js'
 
 const emit = defineEmits(['auto-layout', 'layout-reorder', 'reset-layout', 'canvas-export', 'canvas-import'])
 const configStore = useConfigStore()
@@ -34,19 +35,9 @@ const deviceStore = useDeviceStore()
 const historyStore = useHistoryStore()
 const runStore = useRunStore()
 const uiStore = useUiStore()
+const { startWorkflow } = useWorkflowRun()
 const archiveInput = ref(null)
-const preparingRun = ref(false)
-const locked = computed(() => uiStore.readOnly || runStore.running || configStore.saving || preparingRun.value)
-
-function hasEnabledStep(steps) {
-  for (const step of steps || []) {
-    if (step.enabled) return true
-    for (const branch of Object.values(step.params?.branches || {})) {
-      if (hasEnabledStep(branch)) return true
-    }
-  }
-  return false
-}
+const locked = computed(() => uiStore.readOnly || runStore.running || runStore.preparing || configStore.saving)
 
 async function safe(action) {
   try { await action() } catch (error) { uiStore.notify(error.message, 'error') }
@@ -103,22 +94,8 @@ async function save(title = '配置已保存') {
 
 async function run() {
   if (runStore.running) return safe(() => runStore.stop())
-  if (preparingRun.value || configStore.saving || deviceStore.operationBusy) return
-  preparingRun.value = true
-  try {
-    const connected = await deviceStore.check()
-    if (!connected) throw new Error(deviceStore.error || '未连接 ADB 设备')
-    if (configStore.dirty) {
-      if (deviceStore.resolution) configStore.applyScreenResolution(deviceStore.resolution)
-      await configStore.save()
-      uiStore.notify('未保存的修改已自动保存', 'success')
-    }
-    if (configStore.selectedPreset.loop_count === 0 && !hasEnabledStep(configStore.selectedPreset.steps)) throw new Error('无限循环预设至少需要一个启用步骤')
-    uiStore.clearSelection()
-    await runStore.start(configStore.selectedPreset.id)
-  } finally {
-    preparingRun.value = false
-  }
+  if (runStore.preparing || configStore.saving || deviceStore.operationBusy) return
+  return safe(() => startWorkflow())
 }
 
 async function exportArchive() {
@@ -165,7 +142,7 @@ function changeAcceleration(event) {
     ><Smartphone :size="16" /></button>
 
     <div class="toolbar-separator" />
-    <label class="preset-select"><span>预设</span><select :value="configStore.selectedPreset?.id" :disabled="runStore.running || configStore.saving || preparingRun" @change="switchPreset"><option v-for="preset in configStore.presets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select></label>
+    <label class="preset-select"><span>预设</span><select :value="configStore.selectedPreset?.id" :disabled="runStore.running || configStore.saving || runStore.preparing" @change="switchPreset"><option v-for="preset in configStore.presets" :key="preset.id" :value="preset.id">{{ preset.name }}</option></select></label>
     <div class="button-cluster">
       <button title="新建预设" :disabled="locked" @click="newPreset"><FolderInput :size="15" /></button>
       <button title="复制预设" :disabled="locked" @click="safe(() => configStore.duplicatePreset(configStore.selectedPreset.id))"><Copy :size="15" /></button>
@@ -189,7 +166,7 @@ function changeAcceleration(event) {
       <button title="模板管理" @click="uiStore.templateDrawerOpen = true"><CheckCircle2 :size="16" /></button>
     </div>
     <button class="save-button" title="保存配置" :disabled="locked || !configStore.dirty" @click="safe(save)"><Save :size="16" /><span>{{ configStore.saving ? '保存中' : configStore.dirty ? '保存修改' : '已保存' }}</span><i v-if="configStore.dirty" /></button>
-    <button class="run-button" :class="{ stopping: runStore.running }" :title="runStore.running ? '停止运行' : '运行当前预设'" :disabled="configStore.saving || preparingRun || runStore.state === 'stopping' || deviceStore.operationBusy" @click="safe(run)"><Square v-if="runStore.running" :size="15" fill="currentColor" /><Play v-else :size="16" fill="currentColor" /><span>{{ runStore.state === 'stopping' ? '停止中…' : runStore.running ? '停止' : preparingRun ? '准备中…' : '运行' }}</span></button>
+    <button class="run-button" :class="{ stopping: runStore.running }" :title="runStore.running ? '停止运行' : '运行当前预设'" :disabled="configStore.saving || runStore.preparing || runStore.state === 'stopping' || deviceStore.operationBusy" @click="safe(run)"><Square v-if="runStore.running" :size="15" fill="currentColor" /><Play v-else :size="16" fill="currentColor" /><span>{{ runStore.state === 'stopping' ? '停止中…' : runStore.running ? '停止' : runStore.preparing ? '准备中…' : '运行' }}</span></button>
     <input ref="archiveInput" type="file" accept=".zip,.adb-preset.zip" hidden @change="safe(() => importArchive($event))" />
   </header>
 </template>

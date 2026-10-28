@@ -24,7 +24,7 @@ const filtered = computed(() => {
 })
 const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize)))
 const visibleItems = computed(() => filtered.value.slice(Math.min(page.value, pageCount.value - 1) * pageSize, (Math.min(page.value, pageCount.value - 1) + 1) * pageSize))
-const locked = computed(() => runStore.running || uiStore.readOnly)
+const locked = computed(() => runStore.running || runStore.preparing || uiStore.readOnly)
 
 async function safe(action) {
   try { await action() } catch (error) { uiStore.notify(error.message, 'error') }

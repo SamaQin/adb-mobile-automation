@@ -2,14 +2,15 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event
+from threading import Event, local, get_ident
+from unittest.mock import patch
 import time
 import unittest
 
 import numpy as np
 
 from model_automation.config import ConfigStore
-from model_automation.engine import ExecutionReport, StepResult
+from model_automation.engine import ExecutionReport, RuntimeContext, StepResult
 from model_automation.registry import StepDefinition, StepRegistry
 from model_automation.models import AppConfig, Preset, Step
 from web_server.runtime import RuntimeConflict, RuntimeManager, _LogParser
@@ -56,6 +57,34 @@ class RuntimeManagerTests(unittest.TestCase):
         deadline = time.monotonic() + 2
         while manager.is_running and time.monotonic() < deadline:
             time.sleep(0.01)
+
+    def test_acceleration_is_initialized_on_the_execution_thread(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ConfigStore(root / 'config.json', root / 'templates')
+            preset = Preset(name='test', steps=[Step(name='wait', kind='wait')])
+            store.save(AppConfig(presets=[preset], selected_preset_id=preset.id, acceleration='gpu'))
+            context = local()
+            observed = []
+            caller = get_ident()
+
+            def apply(mode):
+                context.mode = mode
+                return mode
+
+            class Engine:
+                def run(self, _preset, _context):
+                    observed.append((get_ident(), getattr(context, 'mode', None)))
+                    return ExecutionReport('completed', 'done')
+
+            manager = RuntimeManager(store, FakeDevice(), engine_factory=lambda _: Engine())
+            with patch('web_server.runtime.set_acceleration', side_effect=apply):
+                manager.start(preset.id)
+                self.wait_until_idle(manager)
+            self.assertEqual(1, len(observed))
+            self.assertNotEqual(caller, observed[0][0])
+            self.assertEqual('gpu', observed[0][1])
+            self.assertEqual('completed', manager.status()['last_status'])
 
     def test_runtime_locks_mutations_and_snapshots_every_preset(self) -> None:
         with TemporaryDirectory() as directory:
@@ -377,6 +406,70 @@ class StructuredRuntimeTests(unittest.TestCase):
             manager.start(preset.id)
             self.wait_until_idle(manager)
             self.assertEqual("done", manager.status()["node_states"][step.id]["state"])
+
+
+class StartStepRuntimeTests(unittest.TestCase):
+    wait_until_idle = staticmethod(RuntimeManagerTests.wait_until_idle)
+
+    @staticmethod
+    def _manager(directory: str, preset: Preset, calls: list[str]) -> RuntimeManager:
+        store = ConfigStore(Path(directory) / "config.json", Path(directory) / "templates")
+        store.save(AppConfig(presets=[preset], selected_preset_id=preset.id))
+        registry = StepRegistry()
+
+        def run(step: Step, _context: RuntimeContext) -> StepResult:
+            calls.append(step.name)
+            return StepResult(True, "ok")
+
+        registry.register(StepDefinition("wait", "Pass", (), run))
+        return RuntimeManager(store, FakeDevice(), registry=registry)
+
+    def test_start_forwards_start_step_and_runs_only_the_suffix(self) -> None:
+        calls: list[str] = []
+        first = Step(name="first", kind="wait")
+        second = Step(name="second", kind="wait")
+        preset = Preset(name="start", steps=[first, second])
+        with TemporaryDirectory() as directory:
+            manager = self._manager(directory, preset, calls)
+            status = manager.start(preset.id, second.id)
+            self.assertEqual("running", status["state"])
+            self.wait_until_idle(manager)
+
+        self.assertEqual(["second"], calls)
+        self.assertEqual("completed", manager.status()["last_status"])
+        running = {
+            event["data"]["step_id"]
+            for event in manager.events()
+            if event["type"] == "step" and event["data"]["state"] == "running"
+        }
+        self.assertEqual({second.id}, running)
+
+    def test_start_rejects_unknown_and_disabled_start_steps(self) -> None:
+        calls: list[str] = []
+        disabled = Step(name="disabled", kind="wait", enabled=False)
+        available = Step(name="available", kind="wait")
+        preset = Preset(name="invalid", steps=[disabled, available])
+        with TemporaryDirectory() as directory:
+            manager = self._manager(directory, preset, calls)
+            for start_id in ("missing", disabled.id):
+                with self.subTest(start_id=start_id):
+                    with self.assertRaises(ValueError):
+                        manager.start(preset.id, start_id)
+                    self.assertEqual("idle", manager.status()["state"])
+        self.assertEqual([], calls)
+
+    def test_start_without_start_step_keeps_full_run(self) -> None:
+        calls: list[str] = []
+        first = Step(name="first", kind="wait")
+        second = Step(name="second", kind="wait")
+        preset = Preset(name="full", steps=[first, second])
+        with TemporaryDirectory() as directory:
+            manager = self._manager(directory, preset, calls)
+            manager.start(preset.id)
+            self.wait_until_idle(manager)
+
+        self.assertEqual(["first", "second"], calls)
+        self.assertEqual("completed", manager.status()["last_status"])
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import socket
 import subprocess
 import time
 from threading import Event, RLock, Thread, Timer, current_thread
-from typing import Any
+from typing import Any, Mapping
 
 import av
 import cv2
@@ -201,6 +201,7 @@ class ScrcpyScreencast:
         max_fps: int = 30,
         video_bit_rate: int = 4_000_000,
         idle_timeout: float = 2.0,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self.adb_executable = str(adb_executable)
         self.server_path = Path(server_path)
@@ -208,6 +209,7 @@ class ScrcpyScreencast:
         self.max_fps = int(max_fps)
         self.video_bit_rate = int(video_bit_rate)
         self.idle_timeout = idle_timeout
+        self._environment = dict(environment) if environment is not None else None
         self._lock = RLock()
         self._device_change_lock = RLock()
         self._device_ready = Event()
@@ -493,6 +495,7 @@ class ScrcpyScreencast:
                 errors="replace",
                 bufsize=1,
                 creationflags=_creation_flags(),
+                env=self._environment,
             )
         except OSError as exc:
             raise ScreencastError(f"无法启动 scrcpy 服务：{exc}") from exc
@@ -867,6 +870,7 @@ class ScrcpyScreencast:
                 errors="replace",
                 timeout=timeout,
                 creationflags=_creation_flags(),
+                env=self._environment,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ScreencastError(f"ADB 命令失败：{exc}") from exc

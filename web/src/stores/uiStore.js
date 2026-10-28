@@ -18,6 +18,7 @@ export const useUiStore = defineStore('ui', {
     jsonDialog: null,
     dialog: null,
     helpOpen: false,
+    recordingOpen: false,
   }),
   getters: {
     selectedNodeId: (state) => state.selectedNodeIds.length === 1 ? state.selectedNodeIds[0] : null,

@@ -12,7 +12,7 @@ const runStore = useRunStore()
 const uiStore = useUiStore()
 const selectedEdge = computed(() => props.edges.find((item) => item.id === uiStore.selectedEdgeId))
 const selectedNodes = computed(() => uiStore.selectedNodeIds.filter((id) => id !== 'start'))
-const locked = computed(() => uiStore.readOnly || runStore.running || configStore.saving)
+const locked = computed(() => uiStore.readOnly || runStore.running || runStore.preparing || configStore.saving)
 const inspectorScroll = ref(null)
 watch(() => [uiStore.selectedNodeIds.join('|'), uiStore.selectedEdgeId], async () => {
   await nextTick()

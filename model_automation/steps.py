@@ -7,6 +7,7 @@ from typing import Any
 
 from .engine import RuntimeContext, StepResult
 from .models import Preset, Step
+from .recorded_actions import action_end, recording_duration
 from .registry import FieldSpec, StepDefinition, StepRegistry
 from .vision import Match, find_template, load_template, to_gray
 
@@ -299,6 +300,34 @@ def run_find_and_multi_tap(step: Step, context: RuntimeContext) -> StepResult:
     return run_find_and_tap(replace(step, kind="find_and_tap", params=params), context)
 
 
+@_validated_runner("recorded_actions")
+def run_recorded_actions(step: Step, context: RuntimeContext) -> StepResult:
+    actions = step.params.get("actions", [])
+    if not actions:
+        return StepResult(False, "尚未录制操作")
+    previous_end = 0
+    for action in actions:
+        if context.stop_event.is_set():
+            return StepResult(False, "执行已停止")
+        wait_ms = max(0, int(action["at"]) - previous_end)
+        if wait_ms and not context.wait(wait_ms / 1000):
+            return StepResult(False, "执行已停止")
+        if context.stop_event.is_set():
+            return StepResult(False, "执行已停止")
+        if action["type"] == "tap":
+            context.device.tap(int(action["x"]), int(action["y"]))
+        elif action["type"] == "swipe":
+            context.device.swipe(
+                int(action["x1"]), int(action["y1"]),
+                int(action["x2"]), int(action["y2"]),
+                int(action["duration"]),
+            )
+        else:
+            return StepResult(False, f"未知动作类型：{action['type']}")
+        previous_end = action_end(action)
+    return StepResult(True, f"已回放 {len(actions)} 个操作")
+
+
 @_validated_runner("run_preset")
 def run_run_preset(step: Step, context: RuntimeContext) -> StepResult:
     preset_id = str(step.params.get("preset_id", "")).strip()
@@ -442,6 +471,14 @@ REGISTRY.register(
         runner=run_run_preset,
     )
 )
+REGISTRY.register(
+    StepDefinition(
+        key="recorded_actions",
+        label="录制操作",
+        fields=(FieldSpec("actions", "操作序列", "recording", []),),
+        runner=run_recorded_actions,
+    )
+)
 
 
 def step_definitions(registry: StepRegistry = REGISTRY) -> list[dict[str, Any]]:
@@ -489,6 +526,11 @@ def step_summary(step: Step) -> str:
         )
     if step.kind == "run_preset":
         return str(params.get("preset_name", "") or "（未选择预设）")
+    if step.kind == "recorded_actions":
+        actions = params.get("actions", [])
+        if not actions:
+            return "尚未录制"
+        return f"{len(actions)} 个操作 · {recording_duration(actions) / 1000:.1f} 秒"
     if step.kind == "find_and_tap":
         names = [
             str(item.get("file", ""))

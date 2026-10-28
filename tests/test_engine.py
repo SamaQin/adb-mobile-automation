@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 import unittest
@@ -552,6 +553,201 @@ class StructuredEventTests(unittest.TestCase):
         self.assertEqual("outside", jumps[0]["target_step_id"])
         self.assertTrue(jumps[0]["external"])
         self.assertEqual("exit", events[-1]["data"]["action"])
+
+
+class StartStepTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.calls: list[str] = []
+        self.logs: list[str] = []
+        self.jumped = False
+        self.target_id = ""
+        self.child = Preset(
+            name="child", steps=[Step(name="child-first", kind="pass")]
+        )
+        self.registry = StepRegistry()
+        self.registry.register(
+            StepDefinition(key="pass", label="Pass", fields=(), runner=self._pass)
+        )
+        self.registry.register(
+            StepDefinition(
+                key="jump_once", label="Jump once", fields=(), runner=self._jump_once
+            )
+        )
+        self.registry.register(
+            StepDefinition(
+                key="nested", label="Nested", fields=(), runner=self._nested
+            )
+        )
+        self.registry.register(
+            StepDefinition(
+                key="restart", label="Restart", fields=(), runner=self._restart
+            )
+        )
+        self.context = RuntimeContext(
+            device=object(),
+            template_dir=Path("templates"),
+            stop_event=Event(),
+            log=self.logs.append,
+        )
+
+    def _pass(self, step: Step, _context: RuntimeContext) -> StepResult:
+        self.calls.append(step.name)
+        return StepResult(True, "ok")
+
+    def _jump_once(self, step: Step, _context: RuntimeContext) -> StepResult:
+        self.calls.append(step.name)
+        if step.name == "third" and not self.jumped:
+            self.jumped = True
+            return StepResult(True, jump_to=self.target_id)
+        return StepResult(True, "ok")
+
+    def _nested(self, step: Step, context: RuntimeContext) -> StepResult:
+        self.calls.append(step.name)
+        report = context.engine.run(self.child, replace(context))
+        return StepResult(report.status == "completed", report.message)
+
+    def _restart(self, step: Step, _context: RuntimeContext) -> StepResult:
+        self.calls.append(step.name)
+        return StepResult(True, "restart", restart=True)
+
+    def test_start_step_runs_suffix_and_keeps_original_step_indices(self) -> None:
+        first = Step(name="first", kind="pass")
+        second = Step(name="second", kind="pass")
+        third = Step(name="third", kind="pass")
+        events = []
+        context = replace(
+            self.context, start_step_id=second.id, event=events.append
+        )
+
+        report = StepEngine(self.registry).run(
+            Preset(name="suffix", steps=[first, second, third]), context
+        )
+
+        self.assertEqual("completed", report.status)
+        self.assertEqual(["second", "third"], self.calls)
+        running = [
+            event["data"]
+            for event in events
+            if event["type"] == "step" and event["data"]["state"] == "running"
+        ]
+        self.assertEqual([2, 3], [item["step_index"] for item in running])
+
+    def test_start_step_treats_prior_dependencies_as_satisfied(self) -> None:
+        first = Step(name="first", kind="pass")
+        second = Step(name="second", kind="pass", depends_on=[first.id])
+
+        report = StepEngine(self.registry).run(
+            Preset(name="dependent", steps=[first, second]),
+            replace(self.context, start_step_id=second.id),
+        )
+
+        self.assertEqual("completed", report.status)
+        self.assertEqual(["second"], self.calls)
+
+    def test_start_step_treats_disabled_prior_dependency_as_satisfied(self) -> None:
+        first = Step(name="first", kind="pass", enabled=False)
+        second = Step(name="second", kind="pass", depends_on=[first.id])
+
+        report = StepEngine(self.registry).run(
+            Preset(name="dependent", steps=[first, second]),
+            replace(self.context, start_step_id=second.id),
+        )
+
+        self.assertEqual("completed", report.status)
+        self.assertEqual(["second"], self.calls)
+
+    def test_start_step_runs_suffix_once_for_finite_and_infinite_presets(self) -> None:
+        first = Step(name="first", kind="pass")
+        second = Step(name="second", kind="pass")
+        third = Step(name="third", kind="pass")
+        for loop_count in (3, 0):
+            with self.subTest(loop_count=loop_count):
+                self.calls.clear()
+                report = StepEngine(self.registry).run(
+                    Preset(
+                        name="looped",
+                        loop_count=loop_count,
+                        steps=[first, second, third],
+                    ),
+                    replace(self.context, start_step_id=second.id),
+                )
+                self.assertEqual("completed", report.status)
+                self.assertEqual(["second", "third"], self.calls)
+
+    def test_start_step_ignores_return_target_before_start(self) -> None:
+        first = Step(name="first", kind="pass")
+        second = Step(name="second", kind="pass")
+        second.params["return_to"] = first.id
+
+        report = StepEngine(self.registry).run(
+            Preset(name="return", steps=[first, second]),
+            replace(self.context, start_step_id=second.id),
+        )
+
+        self.assertEqual("completed", report.status)
+        self.assertEqual(["second"], self.calls)
+        self.assertTrue(
+            any("起点之前的返回目标" in message for message in self.logs)
+        )
+
+    def test_start_step_allows_return_target_inside_suffix(self) -> None:
+        first = Step(name="first", kind="pass")
+        second = Step(name="second", kind="pass")
+        third = Step(name="third", kind="jump_once")
+        self.target_id = second.id
+
+        report = StepEngine(self.registry).run(
+            Preset(name="return", steps=[first, second, third]),
+            replace(self.context, start_step_id=second.id),
+        )
+
+        self.assertEqual("completed", report.status)
+        self.assertEqual(["second", "third", "second", "third"], self.calls)
+
+    def test_start_step_ends_after_restart_without_another_cycle(self) -> None:
+        first = Step(name="first", kind="pass")
+        trigger = Step(name="trigger", kind="restart")
+        after = Step(name="after", kind="pass")
+
+        report = StepEngine(self.registry).run(
+            Preset(name="restart", loop_count=0, steps=[first, trigger, after]),
+            replace(self.context, start_step_id=trigger.id),
+        )
+
+        self.assertEqual("completed", report.status)
+        self.assertEqual(["trigger"], self.calls)
+        self.assertTrue(any("后缀执行结束" in message for message in self.logs))
+        self.assertFalse(any("开始下一轮循环" in message for message in self.logs))
+
+    def test_start_step_rejects_unknown_or_disabled_start(self) -> None:
+        first = Step(name="first", kind="pass", enabled=False)
+        second = Step(name="second", kind="pass")
+        preset = Preset(name="invalid", steps=[first, second])
+        engine = StepEngine(self.registry)
+
+        for start_id in ("missing", first.id):
+            with self.subTest(start_id=start_id):
+                self.calls.clear()
+                report = engine.run(
+                    preset, replace(self.context, start_step_id=start_id)
+                )
+                self.assertEqual("failed", report.status)
+                self.assertIn("起始步骤", report.message)
+
+    def test_start_step_does_not_leak_into_nested_preset(self) -> None:
+        prefix = Step(name="prefix", kind="pass")
+        nested = Step(name="nested", kind="nested")
+        engine = StepEngine(self.registry)
+
+        report = engine.run(
+            Preset(name="parent", steps=[prefix, nested]),
+            replace(
+                self.context, start_step_id=nested.id, engine=engine
+            ),
+        )
+
+        self.assertEqual("completed", report.status)
+        self.assertEqual(["nested", "child-first"], self.calls)
 
 
 if __name__ == "__main__":

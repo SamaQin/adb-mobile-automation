@@ -16,7 +16,7 @@ from model_automation.engine import ExecutionReport, RuntimeContext, StepEngine
 from model_automation.models import Preset, Step
 from model_automation.registry import StepRegistry
 from model_automation.steps import REGISTRY
-from model_automation.vision import ACCELERATION_LABELS, get_acceleration, set_acceleration
+from model_automation.vision import ACCELERATION_LABELS, set_acceleration
 
 
 class RuntimeConflict(RuntimeError):
@@ -376,7 +376,9 @@ class RuntimeManager:
                     self._update_status(event["data"])
                 self._publish(event)
 
-    def start(self, preset_id: str) -> dict[str, Any]:
+    def start(
+        self, preset_id: str, start_step_id: str | None = None
+    ) -> dict[str, Any]:
         stop_event = Event()
         with self._mutation_lock, self._lock:
             if self._status["state"] in {"starting", "running", "stopping"}:
@@ -411,6 +413,17 @@ class RuntimeManager:
             target = presets.get(preset_id)
             if target is None:
                 raise ValueError("找不到要运行的预设")
+            if start_step_id is not None:
+                if not isinstance(start_step_id, str) or not start_step_id.strip():
+                    raise ValueError("起始步骤不能为空")
+                start_step_id = start_step_id.strip()
+                start_step = next(
+                    (step for step in target.steps if step.id == start_step_id), None
+                )
+                if start_step is None:
+                    raise ValueError("只能从当前预设的主流程步骤开始")
+                if not start_step.enabled:
+                    raise ValueError("该步骤已停用，无法从它开始运行")
         except Exception:
             with self._lock:
                 self._status["state"] = "idle"
@@ -430,11 +443,15 @@ class RuntimeManager:
 
         self._publish({"type": "status", "data": {}})
         started_status = self.status()
-        label = ACCELERATION_LABELS.get(get_acceleration(), get_acceleration())
-        self._log(parser, f"加速模式：{label}")
-
         def worker() -> None:
             try:
+                # OpenCV execution contexts are thread-local. Apply the admitted
+                # mode on the thread that will actually perform recognition.
+                actual = set_acceleration(applied_acceleration)
+                label = ACCELERATION_LABELS.get(actual, actual)
+                self._log(parser, f"加速模式：{label}")
+                if actual != applied_acceleration:
+                    self._log(parser, "执行线程无法启用 GPU，已回退到 CPU")
                 engine = self.engine_factory(self.registry)
                 context = RuntimeContext(
                     device=self.device,
@@ -446,6 +463,7 @@ class RuntimeManager:
                     preset_path=((target.id, target.name),),
                     event=self._engine_event,
                     run_id=self._run_id,
+                    start_step_id=start_step_id,
                 )
                 report = engine.run(target, context)
             except Exception as exc:

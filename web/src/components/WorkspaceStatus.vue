@@ -25,6 +25,7 @@ const stepName = computed(() => {
 })
 const label = computed(() => {
   if (run.state === 'stopping') return '正在停止 · 等待当前设备操作结束'
+  if (run.preparing && !run.running) return '正在准备运行…'
   if (run.running) return `正在运行 · 第 ${run.rootCycle || run.cycle || 1} 轮 · ${stepName.value || '准备执行'}`
   if (run.status === 'failed') return run.message || '运行失败，请查看失败步骤'
   if (run.status === 'completed') return '本次运行已完成'
@@ -39,7 +40,7 @@ const label = computed(() => {
 <template>
   <section class="workspace-status" aria-label="工作台状态">
     <div class="workflow-feedback" :class="{ failed: !run.running && run.status === 'failed' }" role="status">
-      <LoaderCircle v-if="run.running" :size="14" class="spin" />
+      <LoaderCircle v-if="run.running || run.preparing" :size="14" class="spin" />
       <AlertCircle v-else-if="run.status === 'failed'" :size="14" />
       <CheckCircle2 v-else :size="14" />
       <span :title="label">{{ label }}</span>

@@ -104,6 +104,28 @@ class DeviceSelectionTests(TestCase):
                 self.assertEqual(['-s', '10.0.35.91:5555'], command[:2])
         self.assertEqual('10.0.35.91:5555', self.client.selected_serial)
 
+    def test_explicit_serial_input_does_not_change_selection(self):
+        self.client.select_device('USB123')
+        self.client.tap_on('10.0.35.91:5555', 3, 4)
+        self.client.swipe_on('10.0.35.91:5555', 1, 2, 3, 4, 300)
+
+        self.assertEqual(
+            ['-s', '10.0.35.91:5555', 'shell', 'input', 'tap', '3', '4'],
+            self.commands[-2][0],
+        )
+        self.assertEqual(
+            ['-s', '10.0.35.91:5555', 'shell', 'input', 'swipe',
+             '1', '2', '3', '4', '300'],
+            self.commands[-1][0],
+        )
+        self.assertEqual('USB123', self.client.selected_serial)
+
+    def test_explicit_serial_input_rejects_option_like_targets(self):
+        with self.assertRaises(DeviceError):
+            self.client.tap_on('-a', 1, 2)
+        with self.assertRaises(DeviceError):
+            self.client.swipe_on('', 1, 2, 3, 4, 300)
+
     def test_select_rejects_missing_or_unavailable_devices_without_changing_target(self):
         self.client.select_device('USB123')
         self.client.screenshot()
@@ -118,6 +140,15 @@ class DeviceSelectionTests(TestCase):
         self.client.state()
         self.assertEqual(['get-state'], self.commands[-1][0])
         self.assertIsNone(self.client.selected_serial)
+
+    def test_commands_use_project_local_temp_for_adb_server_logs(self):
+        self.client.state()
+        environment = self.mock_run.call_args.kwargs['env']
+        expected = (Path(self.directory.name) / '.adb-runtime' / 'temp').resolve()
+        self.assertEqual(str(expected), environment['TEMP'])
+        self.assertEqual(str(expected), environment['TMP'])
+        self.assertEqual(str(expected / 'adb.log'), environment['ANDROID_ADB_LOG_PATH'])
+        self.assertTrue(expected.is_dir())
 
     def test_connect_verifies_available_target_and_uses_global_command(self):
         self.client.select_device('USB123')

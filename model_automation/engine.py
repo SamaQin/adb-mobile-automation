@@ -34,6 +34,7 @@ class RuntimeContext:
     parent_frame_id: str | None = None
     step_id: str | None = None
     cycle: int = 0
+    start_step_id: str | None = None
 
     def emit(self, event_type: str, **data: Any) -> None:
         if self.event is not None:
@@ -61,14 +62,15 @@ class StepEngine:
     def run(self, preset: Preset, context: RuntimeContext) -> ExecutionReport:
         # Each invocation owns a frame; replace preserves optional callbacks in children.
         parent_step_id = context.step_id
+        start_step_id = context.start_step_id
         context = replace(context, run_id=context.run_id or uuid4().hex,
                           parent_frame_id=context.frame_id, frame_id=uuid4().hex,
-                          step_id=None, cycle=0)
+                          step_id=None, cycle=0, start_step_id=None)
         context.emit("frame", action="enter", preset_id=preset.id,
                      parent_step_id=parent_step_id, step_count=sum(step.enabled for step in preset.steps))
         report = ExecutionReport("failed", "执行异常")
         try:
-            report = self._run(preset, context)
+            report = self._run(preset, context, start_step_id)
             return report
         except Exception as exc:
             report = ExecutionReport("failed", str(exc))
@@ -77,9 +79,34 @@ class StepEngine:
             context.emit("frame", action="exit", preset_id=preset.id,
                          status=report.status, message=report.message, jump_to=report.jump_to)
 
-    def _run(self, preset: Preset, context: RuntimeContext) -> ExecutionReport:
+    def _run(
+        self, preset: Preset, context: RuntimeContext, start_step_id: str | None = None
+    ) -> ExecutionReport:
         active_steps = [step for step in preset.steps if step.enabled]
-        loop_count = max(0, preset.loop_count)
+        start_index = 0
+        assumed: set[str] = set()
+        if start_step_id is not None:
+            start_position = next(
+                (index for index, step in enumerate(preset.steps)
+                 if step.id == start_step_id),
+                -1,
+            )
+            start_index = next(
+                (index for index, step in enumerate(active_steps)
+                 if step.id == start_step_id),
+                -1,
+            )
+            if start_position < 0 or start_index < 0:
+                message = "起始步骤不存在或已停用"
+                context.log(f"  中止：{message}")
+                return ExecutionReport("failed", message)
+            # Include disabled steps before the entry point: they were skipped
+            # by configuration, not failed in this run, and must not block the
+            # explicitly chosen start.
+            assumed = {step.id for step in preset.steps[:start_position]}
+        # A partial run is exactly one suffix pass; repeating the suffix would
+        # either duplicate work or never reach the beginning again.
+        loop_count = 1 if start_step_id is not None else max(0, preset.loop_count)
         loop_label = "无限" if loop_count == 0 else str(loop_count)
         context.log(
             f"开始执行预设：{preset.name}（{len(active_steps)} 个步骤，循环 {loop_label}）"
@@ -93,6 +120,12 @@ class StepEngine:
             context.log("预设没有启用的步骤")
             return ExecutionReport("completed", "预设执行完成")
 
+        if start_step_id is not None:
+            context.log(
+                f"从步骤“{active_steps[start_index].name}”开始执行"
+                f"（跳过前 {start_index} 个启用步骤，执行到末尾）"
+            )
+
         cycle = 0
         while loop_count == 0 or cycle < loop_count:
             cycle += 1
@@ -104,6 +137,10 @@ class StepEngine:
                     context.emit("step", preset_id=preset.id, step_id=disabled.id,
                                  state="skipped", message="disabled")
             skipped: set[str] = {step.id for step in preset.steps if not step.enabled}
+            # Steps before the chosen entry point are treated as already
+            # completed, including disabled ones, so dependencies never block
+            # an explicitly requested start.
+            skipped.difference_update(assumed)
             known_ids = {step.id for step in preset.steps}
             for step in preset.steps:
                 for dep in step.depends_on:
@@ -116,7 +153,7 @@ class StepEngine:
             elif loop_count > 1:
                 context.log(f"第 {cycle}/{loop_count} 轮（已重置步骤状态）")
 
-            cursor = 0
+            cursor = start_index
             while cursor < len(active_steps):
                 if context.stop_event.is_set():
                     return ExecutionReport("stopped", "执行已停止")
@@ -155,7 +192,10 @@ class StepEngine:
                     if result.message:
                         context.log(f"  完成：{result.message}")
                     if result.restart:
-                        context.log("  本轮执行结束，开始下一轮循环")
+                        if start_step_id is not None:
+                            context.log("  后缀执行结束（从指定步骤开始，不再进入下一轮）")
+                        else:
+                            context.log("  本轮执行结束，开始下一轮循环")
                         break
                     jump_target = result.jump_to or step.params.get("return_to")
                     if jump_target:
@@ -168,16 +208,22 @@ class StepEngine:
                             ),
                             None,
                         )
-                        if target_cursor is not None and (
-                            target_cursor < cursor or (propagated and target_cursor == cursor)
-                        ):
-                            context.log(
-                                f"  返回步骤“{id_to_name.get(jump_target, jump_target)}”"
-                            )
-                            context.emit("jump", preset_id=preset.id, step_id=step.id,
-                                         target_step_id=jump_target, external=False)
-                            cursor = target_cursor
-                            continue
+                        if target_cursor is not None:
+                            if target_cursor < start_index:
+                                context.log(
+                                    "  忽略起点之前的返回目标"
+                                    f"“{id_to_name.get(jump_target, jump_target)}”"
+                                )
+                            elif target_cursor < cursor or (
+                                propagated and target_cursor == cursor
+                            ):
+                                context.log(
+                                    f"  返回步骤“{id_to_name.get(jump_target, jump_target)}”"
+                                )
+                                context.emit("jump", preset_id=preset.id, step_id=step.id,
+                                             target_step_id=jump_target, external=False)
+                                cursor = target_cursor
+                                continue
                         if target_cursor is None:
                             if context.allow_external_jump:
                                 context.emit("jump", preset_id=preset.id, step_id=step.id,

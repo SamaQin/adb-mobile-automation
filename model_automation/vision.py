@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+import logging
 from threading import RLock
 from typing import Any
 
@@ -52,17 +53,29 @@ def _probe_cuda_matcher() -> bool:
         return False
 
 
-def _probe_opencl() -> bool:
+def _enable_opencl_gpu() -> bool:
+    """OpenCV execution contexts are thread-local; UMat alone can run on CPU."""
     cv2.ocl.setUseOpenCL(True)
-    if not cv2.ocl.haveOpenCL():
+    if not cv2.ocl.haveOpenCL() or not cv2.ocl.useOpenCL():
+        cv2.ocl.setUseOpenCL(False)
         return False
+    device = cv2.ocl.Device_getDefault()
+    if not (device.type() & cv2.ocl.Device_TYPE_GPU) or not device.available() or not device.compilerAvailable():
+        cv2.ocl.setUseOpenCL(False)
+        return False
+    return True
+
+
+def _probe_opencl() -> bool:
     try:
-        small = np.zeros((16, 16), dtype=np.uint8)
-        result = cv2.matchTemplate(
-            cv2.UMat(small), cv2.UMat(small), cv2.TM_CCOEFF_NORMED
-        )
-        return result.get().shape == (1, 1)
-    except cv2.error:
+        if not _enable_opencl_gpu():
+            return False
+        # Exercise a non-constant, non-degenerate matching workload.
+        image = np.random.default_rng(53).integers(0, 255, (96, 128), dtype=np.uint8)
+        template = image[20:36, 30:46].copy()
+        result = cv2.matchTemplate(cv2.UMat(image), cv2.UMat(template), cv2.TM_CCOEFF_NORMED).get()
+        return cv2.ocl.useOpenCL() and result.shape == (81, 113) and float(result[20, 30]) > 0.99
+    except _cuda_error():
         cv2.ocl.setUseOpenCL(False)
         return False
 
@@ -207,14 +220,18 @@ def _compute_match_result(
                 )
                 return result.download()
             if _GPU_BACKEND == "ocl":
+                if not _enable_opencl_gpu():
+                    raise RuntimeError("当前识别线程未能启用 OpenCL GPU")
                 result = cv2.matchTemplate(
                     cv2.UMat(screen_gray),
                     cv2.UMat(template_gray),
                     cv2.TM_CCOEFF_NORMED,
                 )
                 return result.get()
-        except _cuda_error():
-            pass
+        except _cuda_error() as exc:
+            logging.getLogger(__name__).warning("GPU 模板匹配不可用，已回退到 CPU：%s", exc)
+            set_acceleration(ACCELERATION_CPU)
+    cv2.ocl.setUseOpenCL(False)
     return cv2.matchTemplate(
         screen_gray, template_gray, cv2.TM_CCOEFF_NORMED
     )

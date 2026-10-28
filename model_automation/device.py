@@ -14,6 +14,8 @@ from typing import Sequence
 import cv2
 import numpy as np
 
+from .adb_runtime import prepare_adb_environment
+
 
 class DeviceError(RuntimeError):
     pass
@@ -29,6 +31,7 @@ class AdbClient:
         self.executable = str(bundled.resolve()) if bundled is not None else (
             shutil.which("adb") or "adb"
         )
+        self._environment = prepare_adb_environment(project_root)
         # One reentrant lock covers command dispatch, selection and dimension updates.
         self._lock = RLock()
         self._resolution_lock = self._lock
@@ -41,6 +44,10 @@ class AdbClient:
         with self._lock:
             return self._selected_serial
 
+    @property
+    def environment(self) -> dict[str, str]:
+        return self._environment.copy()
+
     def _run(
         self,
         args: Sequence[str],
@@ -48,11 +55,13 @@ class AdbClient:
         timeout: float = 10,
         binary: bool = False,
         input_text: str | None = None,
+        serial: str | None = None,
     ) -> subprocess.CompletedProcess:
         options: dict[str, object] = {
             "capture_output": True,
             "timeout": timeout,
             "check": False,
+            "env": self._environment,
         }
         if not binary:
             options.update({"text": True, "encoding": "utf-8", "errors": "replace"})
@@ -62,12 +71,20 @@ class AdbClient:
             options["creationflags"] = subprocess.CREATE_NO_WINDOW
         with self._lock:
             target = []
-            if args[0] not in {"devices", "connect", "pair", "disconnect"} and self._selected_serial is not None:
-                target = ["-s", self._selected_serial]
+            target_serial = serial if serial is not None else self._selected_serial
+            if args[0] not in {"devices", "connect", "pair", "disconnect"} and target_serial is not None:
+                target = ["-s", target_serial]
             try:
                 return subprocess.run([self.executable, *target, *args], **options)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise DeviceError(f"ADB 命令失败: {exc}") from exc
+
+    @staticmethod
+    def _validate_input_serial(serial: str | None) -> None:
+        if serial is None:
+            return
+        if not isinstance(serial, str) or not serial.strip() or serial.startswith("-"):
+            raise DeviceError("设备序列号无效")
 
     @staticmethod
     def _text(value: str | bytes | None) -> str:
@@ -273,9 +290,15 @@ class AdbClient:
             return int(width), int(height)
 
     def tap(self, x: int, y: int) -> None:
+        self.tap_on(None, x, y)
+
+    def tap_on(self, serial: str | None, x: int, y: int) -> None:
+        self._validate_input_serial(serial)
         with self._lock:
             try:
-                result = self._run(["shell", "input", "tap", str(x), str(y)])
+                result = self._run(
+                    ["shell", "input", "tap", str(x), str(y)], serial=serial
+                )
                 if result.returncode != 0:
                     raise DeviceError(f"点击失败：{self._error_text(result) or 'ADB 未返回错误详情'}")
             except DeviceError:
@@ -283,9 +306,20 @@ class AdbClient:
                 raise
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int = 300) -> None:
+        self.swipe_on(None, x1, y1, x2, y2, duration)
+
+    def swipe_on(
+        self, serial: str | None, x1: int, y1: int, x2: int, y2: int,
+        duration: int = 300,
+    ) -> None:
+        self._validate_input_serial(serial)
         with self._lock:
             try:
-                result = self._run(["shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration)])
+                result = self._run(
+                    ["shell", "input", "swipe", str(x1), str(y1), str(x2),
+                     str(y2), str(duration)],
+                    serial=serial,
+                )
                 if result.returncode != 0:
                     raise DeviceError(f"滑动失败：{self._error_text(result) or 'ADB 未返回错误详情'}")
             except DeviceError:

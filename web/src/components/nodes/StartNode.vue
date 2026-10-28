@@ -10,7 +10,7 @@ defineProps({ data: { type: Object, required: true } })
 const configStore = useConfigStore()
 const runStore = useRunStore()
 const uiStore = useUiStore()
-const locked = computed(() => uiStore.readOnly || runStore.running || configStore.saving)
+const locked = computed(() => uiStore.readOnly || runStore.running || runStore.preparing || configStore.saving)
 </script>
 
 <template>

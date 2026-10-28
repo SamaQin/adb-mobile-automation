@@ -172,4 +172,13 @@ describe('authoritative run recovery', () => {
     expect(store.nodeStates.a.state).toBe('idle')
     expect(store.status).toBe('stopped')
   })
+
+  it('forwards an optional start step without changing normal start requests', async () => {
+    const store = useRunStore()
+    startRun.mockResolvedValue({ server_id: 'server', run_id: 'run', state: 'running' })
+    await store.start('preset')
+    expect(startRun).toHaveBeenNthCalledWith(1, 'preset')
+    await store.start('preset', 'step-b')
+    expect(startRun).toHaveBeenNthCalledWith(2, 'preset', 'step-b')
+  })
 })

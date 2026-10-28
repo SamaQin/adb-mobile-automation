@@ -120,6 +120,51 @@ class TemplateCacheTests(unittest.TestCase):
 
 
 class AccelerationTests(unittest.TestCase):
+    def tearDown(self):
+        set_acceleration(ACCELERATION_CPU)
+
+    def test_opencl_probe_rejects_disabled_context_and_cpu_device(self):
+        with (patch.object(cv2.ocl, 'setUseOpenCL'),
+              patch.object(cv2.ocl, 'haveOpenCL', return_value=True),
+              patch.object(cv2.ocl, 'useOpenCL', return_value=False),
+              patch.object(cv2, 'matchTemplate') as matcher):
+            self.assertFalse(vision._probe_opencl())
+            matcher.assert_not_called()
+        device = Mock()
+        device.type.return_value = cv2.ocl.Device_TYPE_CPU
+        with (patch.object(cv2.ocl, 'setUseOpenCL'),
+              patch.object(cv2.ocl, 'haveOpenCL', return_value=True),
+              patch.object(cv2.ocl, 'useOpenCL', return_value=True),
+              patch.object(cv2.ocl, 'Device_getDefault', return_value=device),
+              patch.object(cv2, 'matchTemplate') as matcher):
+            self.assertFalse(vision._probe_opencl())
+            matcher.assert_not_called()
+
+    def test_opencl_matching_enables_gpu_in_the_executing_thread(self):
+        screen = np.zeros((32, 40), np.uint8)
+        template = np.zeros((8, 8), np.uint8)
+        with (patch.object(vision, '_ACCELERATION', ACCELERATION_GPU),
+              patch.object(vision, '_GPU_BACKEND', 'ocl'),
+              patch.object(vision, '_enable_opencl_gpu', return_value=True) as enable,
+              patch.object(cv2, 'matchTemplate') as matcher):
+            vision._compute_match_result(screen, template)
+            enable.assert_called_once()
+            self.assertIsInstance(matcher.call_args.args[0], cv2.UMat)
+
+    def test_gpu_error_downgrades_state_and_returns_cpu_result(self):
+        screen = np.zeros((32, 40), np.uint8)
+        template = np.zeros((8, 8), np.uint8)
+        expected = np.zeros((25, 33), np.float32)
+        with (patch.object(vision, '_ACCELERATION', ACCELERATION_GPU),
+              patch.object(vision, '_GPU_BACKEND', 'ocl'),
+              patch.object(vision, '_enable_opencl_gpu', return_value=True),
+              patch.object(cv2, 'matchTemplate', side_effect=[cv2.error('GPU test failure'), expected]),
+              self.assertLogs('model_automation.vision', level='WARNING') as logs):
+            self.assertIs(expected, vision._compute_match_result(screen, template))
+            self.assertEqual(ACCELERATION_CPU, get_acceleration())
+            self.assertIsNone(acceleration_backend())
+            self.assertIn('GPU test failure', logs.output[0])
+
     def test_cuda_probe_and_match_receive_screen_before_template(self):
         screen = np.zeros((16, 20), np.uint8)
         template = np.zeros((8, 10), np.uint8)

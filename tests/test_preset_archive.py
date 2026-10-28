@@ -479,5 +479,71 @@ class RoiScalingTests(unittest.TestCase):
             self.assertEqual((30, 20), cv2.imread(str(folder / "imported" / filename)).shape[:2])
 
 
+class RecordedActionScalingTests(unittest.TestCase):
+    def test_scales_tap_and_swipe_actions_without_mutating_source(self) -> None:
+        source = Step(
+            name="录制",
+            kind="recorded_actions",
+            screen_resolution=(100, 200),
+            params={"actions": [
+                {"type": "tap", "x": 10, "y": 20, "at": 0},
+                {"type": "swipe", "x1": 20, "y1": 40, "x2": 50, "y2": 100,
+                 "duration": 300, "at": 500},
+            ]},
+        )
+
+        scaled = scale_step(source, (200, 400))
+
+        self.assertEqual([
+            {"type": "tap", "x": 20, "y": 40, "at": 0},
+            {"type": "swipe", "x1": 40, "y1": 80, "x2": 100, "y2": 200,
+             "duration": 300, "at": 500},
+        ], scaled.params["actions"])
+        self.assertEqual(10, source.params["actions"][0]["x"])
+        self.assertEqual((100, 200), source.screen_resolution)
+
+    def test_scales_recorded_actions_inside_branches(self) -> None:
+        recorded = Step(
+            name="分支录制",
+            kind="recorded_actions",
+            screen_resolution=(100, 200),
+            params={"actions": [{"type": "tap", "x": 50, "y": 100, "at": 0}]},
+        )
+        source = Step(
+            name="识别",
+            kind="find_and_tap",
+            screen_resolution=(100, 200),
+            params={
+                "templates": [{"file": "target.png"}],
+                "branches": {"0": [recorded.to_dict()]},
+            },
+        )
+
+        scaled = scale_step(source, (200, 400))
+        branch = Step.from_dict(scaled.params["branches"]["0"][0])
+
+        self.assertEqual([{"type": "tap", "x": 100, "y": 200, "at": 0}],
+                         branch.params["actions"])
+        self.assertEqual((200, 400), branch.screen_resolution)
+
+    def test_rejects_actions_without_source_resolution(self) -> None:
+        source = Step(
+            name="录制",
+            kind="recorded_actions",
+            params={"actions": [{"type": "tap", "x": 10, "y": 20, "at": 0}]},
+        )
+
+        with self.assertRaisesRegex(PresetArchiveError, "没有记录屏幕分辨率"):
+            scale_step(source, (200, 400))
+
+    def test_empty_actions_do_not_require_resolution(self) -> None:
+        source = Step(name="空录制", kind="recorded_actions", params={"actions": []})
+
+        scaled = scale_step(source, (200, 400))
+
+        self.assertEqual([], scaled.params["actions"])
+        self.assertEqual((200, 400), scaled.screen_resolution)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,12 @@ NUL
 .env.*
 !.env.example
 
+# ADB runtime logs (kept beside the application)
+.adb-runtime/
+
+# Local agent workspace/ledger
+.superpowers/
+
 # Build and package output
 build/
 dist/

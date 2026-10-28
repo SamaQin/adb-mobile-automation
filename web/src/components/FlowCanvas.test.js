@@ -10,6 +10,10 @@ import { createFlow } from '../flow/createFlow.js'
 import FlowCanvas from './FlowCanvas.vue'
 
 const flowApi = vi.hoisted(() => ({ updateNodeInternals: vi.fn(), fitView: vi.fn() }))
+const workflow = vi.hoisted(() => ({ startWorkflow: vi.fn() }))
+vi.mock('../composables/useWorkflowRun.js', () => ({
+  useWorkflowRun: () => ({ startWorkflow: workflow.startWorkflow }),
+}))
 vi.mock('@vue-flow/core', () => ({
   VueFlow: { name: 'VueFlow', props: ['nodes', 'edges', 'isValidConnection', 'elementsSelectable', 'nodesDraggable', 'nodesConnectable'], template: '<div />' },
   Handle: { template: '<span />' }, Position: { Top: 'top', Bottom: 'bottom', Right: 'right' },
@@ -332,6 +336,34 @@ describe('FlowCanvas guidance and adding steps', () => {
     expect(ui.propertiesCollapsed).toBe(false)
     await wrapper.find('.guide-toggle').trigger('click')
     expect(wrapper.find('.guide-details').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('offers run-from-step in the main step menu and hides it for branch nodes', async () => {
+    await setup()
+    workflow.startWorkflow.mockReset()
+    workflow.startWorkflow.mockResolvedValue()
+    const flow = wrapper.findComponent({ name: 'VueFlow' })
+    const main = wrapper.vm.nodes.find((node) => node.id === 'a')
+    const event = { preventDefault: vi.fn(), stopPropagation: vi.fn(), clientX: 120, clientY: 120 }
+    flow.vm.$emit('node-context-menu', { event, node: main })
+    await nextTick()
+
+    const runButton = wrapper.findAll('.canvas-context-menu button')
+      .find((button) => button.text().includes('从此步骤运行'))
+    expect(runButton).toBeTruthy()
+    await runButton.trigger('click')
+    await Promise.resolve()
+    expect(workflow.startWorkflow).toHaveBeenCalledWith('a')
+    await nextTick()
+
+    config.selectedPreset.steps[0].params.branches = { 0: [step('child')] }
+    await nextTick()
+    await nextTick()
+    const branch = wrapper.vm.nodes.find((node) => node.type === 'branch')
+    flow.vm.$emit('node-context-menu', { event, node: branch })
+    await nextTick()
+    expect(wrapper.text()).not.toContain('从此步骤运行')
     wrapper.unmount()
   })
 

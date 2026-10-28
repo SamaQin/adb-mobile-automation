@@ -200,7 +200,10 @@ def _scale_step(step: Step, target_resolution: tuple[int, int]) -> tuple[float, 
         raise PresetArchiveError(f"不支持的步骤类型：{step.kind}")
     coordinate_fields = [field for field in definition.fields if field.coordinate_axis]
     uses_templates = any(field.kind == "templates" for field in definition.fields)
-    if (coordinate_fields or uses_templates) and step.screen_resolution is None:
+    uses_recording = any(field.kind == "recording" for field in definition.fields)
+    has_recorded_actions = bool(step.params.get("actions"))
+    if (coordinate_fields or uses_templates or (uses_recording and has_recorded_actions)) \
+            and step.screen_resolution is None:
         raise PresetArchiveError(f"步骤“{step.name}”没有记录屏幕分辨率，无法缩放")
 
     source_width, source_height = step.screen_resolution or target_resolution
@@ -243,6 +246,23 @@ def _scale_step(step: Step, target_resolution: tuple[int, int]) -> tuple[float, 
             maximum = target_width - 1 if field.coordinate_axis == "x" else target_height - 1
             scaled = max(0, min(maximum, scaled))
         step.params[field.key] = scaled
+    if uses_recording:
+        def scaled_coord(value: int, scale: float, maximum: int) -> int:
+            return max(0, min(maximum, int(round(int(value) * scale))))
+
+        actions = []
+        for action in step.params.get("actions", []):
+            item = dict(action)
+            if item.get("type") == "tap":
+                item["x"] = scaled_coord(item["x"], scale_x, target_width - 1)
+                item["y"] = scaled_coord(item["y"], scale_y, target_height - 1)
+            else:
+                item["x1"] = scaled_coord(item["x1"], scale_x, target_width - 1)
+                item["y1"] = scaled_coord(item["y1"], scale_y, target_height - 1)
+                item["x2"] = scaled_coord(item["x2"], scale_x, target_width - 1)
+                item["y2"] = scaled_coord(item["y2"], scale_y, target_height - 1)
+            actions.append(item)
+        step.params["actions"] = actions
     step.screen_resolution = target_resolution
     return scale_x, scale_y
 

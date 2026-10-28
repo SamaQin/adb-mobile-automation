@@ -26,8 +26,8 @@ const fieldErrors = ref({})
 const localBusy = ref(false)
 const previousFocus = document.activeElement
 const busy = computed(() => localBusy.value || device.operationBusy || device.refreshing)
-const locked = computed(() => run.running || ui.readOnly)
-const lockReason = computed(() => run.running ? '运行中可查看和刷新设备，停止后可连接、配对、切换或断开。' : ui.readOnly ? '只读模式：可查看和刷新设备，不能连接、配对、切换或断开。' : '')
+const locked = computed(() => run.running || run.preparing || ui.readOnly)
+const lockReason = computed(() => run.running ? '运行中可查看和刷新设备，停止后可连接、配对、切换或断开。' : run.preparing ? '正在准备运行，请稍候再操作设备。' : ui.readOnly ? '只读模式：可查看和刷新设备，不能连接、配对、切换或断开。' : '')
 const status = computed(() => device.connected ? '已连接' : device.state === 'unauthorized' ? '未授权' : device.state === 'offline' ? '离线' : device.state === 'error' ? '检测失败' : '未连接')
 const currentTarget = computed(() => device.serial || device.selectedSerial || '尚未选择设备')
 function stateLabel(state) {

@@ -1,11 +1,13 @@
 <script setup>
 import { computed } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
-import { Check, CircleSlash2, Copy, GitBranch, Power, Trash2, X } from 'lucide-vue-next'
+import { Check, CircleSlash2, Copy, GitBranch, Play, Power, Trash2, X } from 'lucide-vue-next'
 import { useConfigStore } from '../../stores/configStore.js'
 import { useRunStore } from '../../stores/runStore.js'
 import { useUiStore } from '../../stores/uiStore.js'
+import { useWorkflowRun } from '../../composables/useWorkflowRun.js'
 import { appearanceFor } from '../../constants/nodeAppearance.js'
+import { formatDuration, recordingDuration } from '../../utils/recordedActions.js'
 
 const props = defineProps({
   id: { type: String, required: true },
@@ -16,9 +18,10 @@ const props = defineProps({
 const configStore = useConfigStore()
 const runStore = useRunStore()
 const uiStore = useUiStore()
+const { startWorkflow } = useWorkflowRun()
 const appearance = computed(() => appearanceFor(props.data.step?.kind))
 const Icon = computed(() => appearance.value.icon)
-const locked = computed(() => uiStore.readOnly || runStore.running || configStore.saving)
+const locked = computed(() => uiStore.readOnly || runStore.running || runStore.preparing || configStore.saving)
 const templates = computed(() => props.data.step?.params?.templates || [])
 const branchOutputs = computed(() => Object.entries(props.data.step?.params?.branches || {})
   .filter(([, steps]) => steps?.length)
@@ -47,12 +50,26 @@ function summary(step) {
   }
   if (step?.kind === 'run_preset') return configStore.presets.find((item) => item.id === params.preset_id)?.name || params.preset_name || '未选择预设'
   if (step?.kind === 'end_loop') return '进入下一轮'
+  if (step?.kind === 'recorded_actions') {
+    const actions = params.actions || []
+    if (!actions.length) return '尚未录制操作'
+    return `${actions.length} 个操作 · ${formatDuration(recordingDuration(actions))}`
+  }
   return '无参数'
 }
 
 function mutate(action) {
   if (locked.value) return
   action()
+}
+
+async function runFromStep() {
+  if (locked.value || !props.data.step?.enabled) return
+  try {
+    await startWorkflow(props.data.step.id)
+  } catch (error) {
+    uiStore.notify(error.message, 'error')
+  }
 }
 </script>
 
@@ -65,6 +82,7 @@ function mutate(action) {
     <Handle id="order-target" type="target" :position="Position.Top" :connectable="!locked" />
     <div class="node-accent" />
     <div v-if="!locked" class="node-actions nodrag">
+      <button title="从此步骤运行" :disabled="!data.step.enabled" @click.stop="runFromStep"><Play :size="13" fill="currentColor" /></button>
       <button title="复制步骤" :disabled="locked" @click.stop="mutate(() => configStore.duplicateStep(id))"><Copy :size="13" /></button>
       <button :title="data.step.enabled ? '停用步骤' : '启用步骤'" :disabled="locked" @click.stop="mutate(() => configStore.mutateStep(id, (step) => { step.enabled = !step.enabled }, '切换步骤'))"><Power :size="13" /></button>
       <button title="删除步骤" class="danger" :disabled="locked" @click.stop="mutate(() => configStore.deleteSteps([id]))"><Trash2 :size="13" /></button>
